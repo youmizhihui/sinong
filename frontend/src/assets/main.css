@@ -1,0 +1,185 @@
+/* 司农记账 — 设计令牌（明亮活泼版，移动端优先，375px 基准） */
+:root {
+  --brand: #FF6B4A;          /* 活力珊瑚橙（主色） */
+  --brand-dark: #E8532F;
+  --brand-soft: #FFE9E2;     /* 珊瑚浅底 */
+  --income: #22A06B;         /* 收入绿 */
+  --expense: #E5484D;        /* 支出红 */
+  --bg: #F9F8F5;             /* 暖白背景 */
+  --card: #FFFFFF;
+  --border: #F0EBE4;
+  --text: #1F2937;
+  --text2: #7A8699;
+  --radius: 16px;
+}
+
+/* ===== Vant 4 主题覆盖（对齐司农品牌色） ===== */
+:root {
+  --van-primary-color: var(--brand);
+  --van-success-color: #22A06B;
+  --van-danger-color: #E5484D;
+  --van-warning-color: #F7A325;
+  --van-background: var(--bg);
+  --van-background-2: var(--card);
+  --van-text-color: var(--text);
+  --van-text-color-2: var(--text2);
+  --van-border-color: var(--border);
+  --van-radius-md: 12px;
+  --van-popup-round-radius: 16px;
+  --van-calendar-selected-day-background: var(--brand);
+  --van-calendar-selected-day-color: #fff;
+  --van-calendar-day-disabled-color: #E7E2DA;
+  --van-calendar-header-title-color: var(--text);
+  --van-toast-text-color: #fff;
+  --van-dialog-confirm-button-text-color: var(--brand);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'PingFang SC', 'HarmonyOS Sans', 'Segoe UI', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#app {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+button { font-family: inherit; border: none; background: none; cursor: pointer; color: inherit; }
+input, select, textarea { font-family: inherit; font-size: 14px; border: none; outline: none; }
+
+.card {
+  background: var(--card);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  padding: 14px;
+}
+
+.muted { color: var(--text2); font-size: 12px; }
+.num { font-variant-numeric: tabular-nums; }
+.money-income { color: var(--income); }
+.money-expense { color: var(--expense); }
+
+/* 页面容器：底部留出 tabbar（凸起按钮）高度；左右内缩 */
+.page { flex: 1; padding: 12px 16px 104px; }
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  padding: 8px 4px 12px;
+}
+
+/* 通用列表行 */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.row:last-child { border-bottom: none; }
+
+.icon-badge {
+  width: 38px; height: 38px;
+  border-radius: 10px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+
+/* 占位页 */
+.placeholder {
+  text-align: center;
+  color: var(--text2);
+  padding: 60px 20px;
+}
+.placeholder .ph-icon { color: #C9C6BD; margin-bottom: 12px; }
+
+/* ===== 月历卡（全局，首页和月历页共用） ===== */
+.cal-card { padding: 14px; margin-top: 4px; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.cal-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.cal-nav { display: flex; align-items: center; gap: 8px; }
+.cal-arrow {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--bg); color: var(--text2); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+}
+.cal-week { display: grid; grid-template-columns: repeat(7, 1fr); }
+.cal-week-cell { text-align: center; font-size: 11px; color: var(--text2); padding: 2px 0; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-top: 2px; }
+.cal-cell {
+  height: 40px; border-radius: 8px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1px; position: relative;
+  min-width: 0; overflow: hidden;
+}
+.cal-day { font-size: 12px; font-weight: 500; color: var(--text); line-height: 1.1; }
+.cal-amt {
+  font-size: 9px; line-height: 1.2;
+  width: 100%; min-width: 0; text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 2px;
+}
+.cal-amt.exp { color: var(--expense); font-weight: 700; }
+.cal-amt.inc { color: var(--income); font-weight: 700; }
+.cal-cell.today { outline: 1.5px solid var(--brand); outline-offset: -1.5px; border-radius: 8px; }
+.cal-cell.today .cal-day { font-weight: 700; color: var(--brand); }
+.cal-cell.today .cal-amt { color: var(--text2); }
+
+/* ===== 按日分组列表（全局） ===== */
+.list-card { padding: 6px 14px 12px; }
+.day-group { margin-top: 8px; }
+.day-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px; color: var(--text2);
+  padding: 8px 0 2px; border-bottom: 1px dashed var(--border);
+}
+.row-main { flex: 1; min-width: 0; }
+.row-title { font-size: 14px; }
+.row { cursor: pointer; }
+
+/* ==================== PC 端（≥768px）==================== */
+@media (min-width: 768px) {
+  #app { max-width: none; flex-direction: row; }
+  .shell { display: flex; flex: 1; min-height: 100dvh; width: 100%; background: var(--bg); }
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .page {
+    padding: 28px 40px 56px;
+    max-width: 1080px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  .page-title { font-size: 20px; padding: 8px 4px 20px; }
+  .card { border-radius: 14px; }
+}
+
+/* ===== Vant Picker PC 端鼠标兼容修复 ===== */
+.van-picker-column {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+.van-picker-column:active { cursor: grabbing; }
+.van-picker-column__wrapper {
+  will-change: transform;
+}
+
+/* ===== PC 拖动滚动容器：禁止选中文字 ===== */
+.cat-grid, .cat-tabs, .acc-groups, .cat-pop, .acc-pop,
+.entry-list, .month-list, .detail-list, .ledger-list,
+.member-list, .report-scroll, .budget-list, .setting-list,
+.periodic-list, .home-list {
+  user-select: none;
+  -webkit-user-select: none;
+}

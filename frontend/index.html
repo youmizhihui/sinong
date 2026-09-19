@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#D4A04A" />
+    <title>司农记账</title>
+    <style>
+      #splash {
+        position: fixed; inset: 0; z-index: 9999;
+        background: linear-gradient(160deg, #E8C478 0%, #D4A04A 50%, #C08C3A 100%);
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        transition: opacity 0.4s ease;
+      }
+      #splash.hide { opacity: 0; pointer-events: none; }
+      #splash .slogan {
+        font-size: 22px; font-weight: 600; color: #FFF8EC;
+        letter-spacing: 4px; text-shadow: 0 1px 4px rgba(0,0,0,0.12);
+        animation: splashFade 1.2s ease;
+      }
+      #splash .sub {
+        margin-top: 10px; font-size: 13px; color: rgba(255,248,236,0.7);
+        letter-spacing: 2px; animation: splashFade 1.2s ease 0.2s both;
+      }
+      #splash .version {
+        position: absolute; bottom: 28px;
+        font-size: 11px; color: rgba(255,248,236,0.5);
+        letter-spacing: 1px;
+      }
+      @keyframes splashFade {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="splash">
+      <div class="slogan">司农已到，账房已开</div>
+      <div class="sub">钱谷之事，交给司农</div>
+      <div class="version">v0.0.3</div>
+    </div>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

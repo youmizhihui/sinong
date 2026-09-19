@@ -1,0 +1,29 @@
+# 依赖
+node_modules/
+
+# 前端构建产物
+frontend/dist/
+frontend/node_modules/
+
+# 后端依赖
+app/server/node_modules/
+
+# fnpack 打包产物（拷到 app/www 的构建文件）
+app/www/
+
+# 本地调试数据
+.devdb/
+*.db
+*.db-wal
+*.db-shm
+
+# 打包产物
+*.fpk
+
+# 日志
+*.log
+docs/
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db

@@ -1,0 +1,14 @@
+{
+  ".url": {
+    "sinong.main": {
+      "title": "司农记账",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/sinong",
+      "gatewaySocket": "app.sock",
+      "url": "/app/sinong",
+      "allUsers": true
+    }
+  }
+}

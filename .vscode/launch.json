@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "后端 (18099)",
+      "cwd": "${workspaceFolder}",
+      "program": "${workspaceFolder}/app/server/server.js",
+      "args": ["--port", "18099", "--data-dir", ".devdb"],
+      "console": "integratedTerminal"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "前端 Vite (5173)",
+      "cwd": "${workspaceFolder}/frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "司农记账-前后端一起跑",
+      "configurations": ["后端 (18099)", "前端 Vite (5173)"]
+    }
+  ]
+}

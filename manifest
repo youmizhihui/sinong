@@ -1,0 +1,17 @@
+appname=sinong
+version=0.0.3
+display_name=司农记账
+desc=本地优先的家庭记账应用。支持私人账本与共享账本，数据只保存在你自己的飞牛 NAS 上，不经过任何第三方服务器，无广告。
+source=thirdparty
+platform=all
+maintainer=有米智汇
+maintainer_url="https://github.com/youmizhihui/sinong"
+distributor=有米智汇
+distributor_url="https://github.com/youmizhihui/sinong"
+os_min_version=1.2.0401
+desktop_uidir=ui
+desktop_applaunchname=sinong.main
+ctl_stop=true
+checkport=false
+micro_app=true
+install_dep_apps=nodejs_v22
