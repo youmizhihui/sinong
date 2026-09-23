@@ -71,6 +71,174 @@ function parseTransferAccounts(text) {
   return { from: parts[0] || '', to: parts[1] || '' };
 }
 
+/** 列索引 → 列字母（0 → A） */
+function colLetter(n) {
+  let s = '';
+  n = n + 1;
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+/**
+ * 提取 Excel 结构信息（供 AI 分析）：每个 sheet 的名字 + 前 12 行样本。
+ * 只取结构样本，不发送全部数据，控制 token 消耗。
+ * @param {Buffer} buffer
+ */
+function extractWorkbookStructure(buffer) {
+  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: false });
+  return wb.SheetNames.map((name) => {
+    const ws = wb.Sheets[name];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    return {
+      sheet: name,
+      rowCount: rows.length,
+      rows: rows.slice(0, 12).map((r, i) => ({
+        r: i + 1,
+        cells: (r || []).map((c, j) => ({ c: colLetter(j), v: String(c).slice(0, 30) })),
+      })),
+    };
+  });
+}
+
+/** AI 返回的字段引用 → 列索引（支持 'A'/'C' 列字母 或 表头名） */
+function resolveFieldIndexes(rows, headerRow, fields) {
+  const header = rows[headerRow] || [];
+  const fm = {};
+  for (const [field, ref] of Object.entries(fields || {})) {
+    if (!ref) continue;
+    const s = String(ref).trim();
+    if (/^[A-Za-z]{1,3}$/.test(s)) {
+      let idx = 0;
+      for (const ch of s.toUpperCase()) idx = idx * 26 + (ch.charCodeAt(0) - 64);
+      fm[field] = idx - 1;
+    } else {
+      const idx = header.findIndex((c) => String(c || '').trim() === s || String(c || '').trim().includes(s));
+      if (idx >= 0) fm[field] = idx;
+    }
+  }
+  return fm;
+}
+
+/** 按 AI 映射解析单个 sheet（type 固定，或每行用类型列区分） */
+function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
+  const fm = resolveFieldIndexes(rows, headerRow, spec.fields || {});
+  const sheetType = spec.type || 'expense';
+  const hasTypeCol = fm.type !== undefined;
+
+  for (let i = headerRow + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || row.every((c) => c === '' || c === null || c === undefined)) continue;
+
+    const entryDate = fm.date !== undefined ? parseDate(row[fm.date]) : null;
+    if (!entryDate) continue;
+    const rowType = hasTypeCol ? String(row[fm.type] || '').trim() : sheetType;
+    const amount = fm.amount !== undefined ? parseAmount(row[fm.amount]) : 0;
+    const note = (fm.note !== undefined ? String(row[fm.note] ?? '').trim() : '')
+      || (fm.merchant !== undefined ? String(row[fm.merchant] ?? '').trim() : '');
+    const categoryFull = (fm.category !== undefined ? String(row[fm.category] ?? '').trim() : '')
+      || (fm.categoryChild !== undefined ? String(row[fm.categoryChild] ?? '').trim() : '')
+      || (fm.categoryParent !== undefined ? String(row[fm.categoryParent] ?? '').trim() : '');
+    const [parent, child] = categoryFull.split('/').map((s) => s.trim());
+    const accountRaw = cleanAccountName(fm.account !== undefined ? String(row[fm.account] ?? '').trim() : '');
+    const accountFrom = cleanAccountName(fm.accountFrom !== undefined ? String(row[fm.accountFrom] ?? '').trim() : '');
+    const accountTo = cleanAccountName(fm.accountTo !== undefined ? String(row[fm.accountTo] ?? '').trim() : '');
+    const memberName = parseMember(fm.member !== undefined ? String(row[fm.member] ?? '').trim() : '');
+    const reimburse = fm.reimburse !== undefined ? String(row[fm.reimburse] ?? '').trim() : '';
+
+    if (rowType === 'expense' || rowType === '支出' || rowType === '消费') {
+      let categoryId = null;
+      if (parent && child) {
+        const key = `${parent}|${child}`;
+        categoryId = catIdx.index[key] || null;
+        if (!categoryId) result.newCategories.set(key, 'expense');
+      } else if (parent) {
+        categoryId = catIdx.parentIndex[parent] || null;
+        if (!categoryId) result.newCategories.set(parent, 'expense');
+      }
+      let accountId = null;
+      if (accountRaw) {
+        accountId = accIdx[accountRaw] || null;
+        if (!accountId) result.newAccounts.add(accountRaw);
+      }
+      let memberId = null;
+      if (memberName) {
+        memberId = memIdx[memberName] || null;
+        if (!memberId) result.newMembers.add(memberName);
+      }
+      result.expense.push({
+        entryDate, amount, categoryId, categoryName: child || parent || '其他', categoryParent: parent || null,
+        accountId, accountName: accountRaw || '现金',
+        memberId, memberName: memberName || '',
+        reimbursable: reimburse === '可报销' || reimburse === '待报销' || reimburse === '是',
+        note, rowNum: i + 1,
+      });
+    } else if (rowType === 'income' || rowType === '收入') {
+      let categoryId = parent ? catIdx.parentIndex[parent] || null : null;
+      if (parent && !categoryId) result.newCategories.set(parent, 'income');
+      let accountId = null;
+      if (accountRaw) {
+        accountId = accIdx[accountRaw] || null;
+        if (!accountId) result.newAccounts.add(accountRaw);
+      }
+      let memberId = null;
+      if (memberName) {
+        memberId = memIdx[memberName] || null;
+        if (!memberId) result.newMembers.add(memberName);
+      }
+      result.income.push({
+        entryDate, amount, categoryId, categoryName: parent || '其他收入',
+        accountId, accountName: accountRaw || '现金',
+        memberId, memberName: memberName || '',
+        note, rowNum: i + 1,
+      });
+    } else if (rowType === 'transfer' || rowType === '转账') {
+      let from = accountFrom || '';
+      let to = accountTo || '';
+      if (!from && !to && accountRaw) {
+        const parsed = parseTransferAccounts(accountRaw);
+        from = parsed.from;
+        to = parsed.to;
+      }
+      let fromId = null, toId = null;
+      if (from) {
+        fromId = accIdx[from] || null;
+        if (!fromId) result.newAccounts.add(from);
+      }
+      if (to) {
+        toId = accIdx[to] || null;
+        if (!toId) result.newAccounts.add(to);
+      }
+      result.transfer.push({
+        entryDate, amount, fromAccountId: fromId, fromAccountName: from || '',
+        toAccountId: toId, toAccountName: to || '',
+        note, rowNum: i + 1,
+      });
+    } else if (rowType === 'loan' || rowType === '借贷' || rowType === 'repay' || rowType === '收款还款' || rowType === '借入借出') {
+      const LOAN_ACC = '借入借出';
+      if (!accIdx[LOAN_ACC]) result.newAccounts.add(LOAN_ACC);
+      const isOutflow = /借出|还款|付出|贷出/.test(categoryFull || rowType);
+      let accountId = null;
+      if (accountRaw) {
+        accountId = accIdx[accountRaw] || null;
+        if (!accountId) result.newAccounts.add(accountRaw);
+      }
+      result.transfer.push({
+        entryDate, amount,
+        fromAccountId: isOutflow ? accountId : null,
+        fromAccountName: isOutflow ? (accountRaw || '现金') : LOAN_ACC,
+        toAccountId: isOutflow ? null : accountId,
+        toAccountName: isOutflow ? LOAN_ACC : (accountRaw || '现金'),
+        note: `[${categoryFull || '借贷'}] ${note}`.trim(),
+        rowNum: i + 1,
+      });
+    }
+  }
+}
+
 /** 解析单 sheet 新格式 */
 function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
   const headerMap = mapHeader(rows[headerRow]);
@@ -278,8 +446,11 @@ function buildMemberIndex() {
 /**
  * 解析 Excel buffer，返回预览数据
  * @param {Buffer} buffer
+ * @param {object|null} aiMapping 可选的 AI 识别结果：{ sheets: [{ sheet, type, headerRow, fields }] }
+ *   - 提供时跳过规则检测，直接按 AI 映射解析每个 sheet
+ *   - 不提供时使用现有规则（sheet 名 + 表头别名自动识别）
  */
-function parseWorkbook(buffer) {
+function parseWorkbook(buffer, aiMapping) {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: false });
   const catIdx = buildCategoryIndex();
   const accIdx = buildAccountIndex();
@@ -291,6 +462,27 @@ function parseWorkbook(buffer) {
     warnings: [],
   };
 
+  // ---- AI 映射模式 ----
+  if (aiMapping && Array.isArray(aiMapping.sheets)) {
+    for (const spec of aiMapping.sheets) {
+      if (!spec || spec.type === 'skip' || spec.type === '其他') continue;
+      const ws = wb.Sheets[spec.sheet];
+      if (!ws) {
+        result.warnings.push(`AI 映射指定的 sheet「${spec.sheet}」不存在，已跳过`);
+        continue;
+      }
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+      const headerRow = Math.max(0, (Number(spec.headerRow) || 1) - 1);
+      if (headerRow >= rows.length) {
+        result.warnings.push(`Sheet「${spec.sheet}」表头行 ${spec.headerRow} 超出范围，已跳过`);
+        continue;
+      }
+      parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result);
+    }
+    return buildSummary(result);
+  }
+
+  // ---- 规则模式 ----
   for (const sheetName of wb.SheetNames) {
     const type = detectSheetType(sheetName);
     const ws = wb.Sheets[sheetName];
@@ -434,6 +626,11 @@ function parseWorkbook(buffer) {
     }
   }
 
+  return buildSummary(result);
+}
+
+/** 把解析明细汇总为预览摘要 */
+function buildSummary(result) {
   return {
     expenseCount: result.expense.length,
     incomeCount: result.income.length,
@@ -582,4 +779,4 @@ function doImport(parsed, ledgerId, userUid) {
   }
 }
 
-module.exports = { parseWorkbook, doImport };
+module.exports = { parseWorkbook, doImport, extractWorkbookStructure };

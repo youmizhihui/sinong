@@ -14,11 +14,74 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const { initDb, getDb, genId, touchUser, getUsers } = require('./db');
-const { parseWorkbook, doImport } = require('./import');
+const { parseWorkbook, doImport, extractWorkbookStructure } = require('./import');
 const XLSX = require('xlsx');
 
 /** 导入预览缓存：token → 解析结果（5分钟有效） */
 const importCache = new Map();
+// ==================== AI 导入格式识别 ====================
+const AI_SYSTEM_PROMPT = `你是 Excel 记账账单格式分析专家。用户会提供记账软件导出的 Excel 文件结构样本（每个 sheet 列出前 12 行，r=行号，c=列字母，v=单元格内容截断）。
+请分析每个 sheet：
+1. 业务类型 type：expense(支出)/income(收入)/transfer(转账)/loan(借贷)/repay(收款还款)/skip(非账单数据，跳过)
+2. 表头行 headerRow：数据表头所在行号（1 起始）。若样本中没有明显表头，根据内容推断数据起始行。
+3. 字段映射 fields：date(日期)/amount(金额)/category(分类或类别，可含大类小类)/categoryParent(大类)/categoryChild(小类)/note(备注描述)/account(账户)/accountFrom(转出账户)/accountTo(转入账户)/member(成员或消费人)/type(类型列，若每行用类型区分收支)/merchant(商家)/reimburse(报销标记)。
+   fields 的值填列字母（如 A、C）或表头列名（如"消费日期"）。
+   category 与 categoryParent/categoryChild 至少给一个；分不清就给 category。
+4. 只返回 JSON，不要任何其他文字：
+{"sheets":[{"sheet":"sheet名","type":"expense","headerRow":2,"fields":{"date":"A","amount":"C","category":"B","note":"D","account":"E"}}]}
+如果 sheet 无法判断为账单，type 返回 "skip"。`;
+
+function maskKey(key) {
+  if (!key) return '';
+  if (key.length <= 8) return '****' + key.slice(-2);
+  return key.slice(0, 3) + '****' + key.slice(-4);
+}
+
+async function callAi(structure) {
+  const db = getDb();
+  const url = db.prepare("SELECT value FROM setting WHERE key='ai_url'").get()?.value;
+  const model = db.prepare("SELECT value FROM setting WHERE key='ai_model'").get()?.value;
+  const key = db.prepare("SELECT value FROM setting WHERE key='ai_key'").get()?.value;
+  if (!url || !model) throw httpError(400, '请先在「设置 - AI 识别配置」中填写 API 地址和模型');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45000);
+  try {
+    let endpoint = url;
+    if (!/\/chat\/completions$/.test(endpoint)) endpoint = endpoint.replace(/\/+$/, '') + '/chat/completions';
+    const headers = { 'Content-Type': 'application/json' };
+    if (key) headers['Authorization'] = `Bearer ${key}`; // Ollama 等本地服务可免密钥
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: AI_SYSTEM_PROMPT },
+          { role: 'user', content: JSON.stringify(structure) },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw httpError(502, `AI 接口错误 ${res.status}：${data?.error?.message || res.statusText}`);
+    }
+    const text = data.choices?.[0]?.message?.content || '';
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) throw httpError(502, 'AI 返回内容不是有效 JSON');
+    const parsed = JSON.parse(text.slice(start, end + 1));
+    if (!parsed.sheets || !Array.isArray(parsed.sheets)) throw httpError(502, 'AI 返回缺少 sheets 字段');
+    return parsed;
+  } catch (e) {
+    if (e && e.status) throw e;
+    if (e && e.name === 'AbortError') throw httpError(504, 'AI 请求超时（45 秒），请检查接口地址或网络');
+    throw httpError(502, `AI 调用失败：${e.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const MAX_BODY = 4 * 1024 * 1024; // 4MB（后续附件上传单独走 multipart）
 
@@ -897,6 +960,81 @@ function createRouter(user) {
       if (!lid) throw httpError(400, '没有可用的账本，请先创建账本');
       const r = doImport(parsed, lid, user.uid);
       return { ok: true, created: r.created, ledgerId: lid };
+    },
+    // ---- AI 导入格式识别 ----
+    'GET /api/ai/config': () => {
+      const db = getDb();
+      const url = db.prepare("SELECT value FROM setting WHERE key='ai_url'").get()?.value || '';
+      const model = db.prepare("SELECT value FROM setting WHERE key='ai_model'").get()?.value || '';
+      const key = db.prepare("SELECT value FROM setting WHERE key='ai_key'").get()?.value || '';
+      return { url, model, hasKey: !!key, keyMask: key ? maskKey(key) : '' };
+    },
+    'PUT /api/ai/config': async (body) => {
+      const db = getDb();
+      const url = String(body.url || '').trim();
+      const model = String(body.model || '').trim();
+      if (!url || !model) throw httpError(400, 'API 地址与模型名必填');
+      db.prepare('INSERT OR REPLACE INTO setting (key,value) VALUES (?,?)').run('ai_url', url);
+      db.prepare('INSERT OR REPLACE INTO setting (key,value) VALUES (?,?)').run('ai_model', model);
+      if (body.key && String(body.key).trim()) {
+        db.prepare('INSERT OR REPLACE INTO setting (key,value) VALUES (?,?)').run('ai_key', String(body.key).trim());
+      }
+      const key = db.prepare("SELECT value FROM setting WHERE key='ai_key'").get()?.value || '';
+      return { ok: true, hasKey: !!key, keyMask: key ? maskKey(key) : '' };
+    },
+    'POST /api/ai/test': async (body) => {
+      const db = getDb();
+      const savedUrl = db.prepare("SELECT value FROM setting WHERE key='ai_url'").get()?.value || '';
+      const savedModel = db.prepare("SELECT value FROM setting WHERE key='ai_model'").get()?.value || '';
+      const savedKey = db.prepare("SELECT value FROM setting WHERE key='ai_key'").get()?.value || '';
+      const url = (body && String(body.url || '').trim()) || savedUrl;
+      const model = (body && String(body.model || '').trim()) || savedModel;
+      const key = (body && String(body.key || '').trim()) || savedKey;
+      if (!url || !model) throw httpError(400, '请先填写 API 地址和模型名称');
+      let endpoint = url;
+      if (!/\/chat\/completions$/.test(endpoint)) endpoint = endpoint.replace(/\/+$/, '') + '/chat/completions';
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      const t0 = Date.now();
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (key) headers['Authorization'] = `Bearer ${key}`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+          signal: controller.signal,
+        });
+        if (res.ok) return { ok: true, message: `连接成功（${Date.now() - t0}ms）`, model };
+        const data = await res.json().catch(() => ({}));
+        const detail = String(data?.error?.message || data?.message || '').slice(0, 100);
+        if (res.status === 401 || res.status === 403) throw httpError(502, `密钥无效或无权限（HTTP ${res.status}）` + (detail ? `：${detail}` : ''));
+        if (res.status === 404) throw httpError(502, '地址或模型不存在（HTTP 404）' + (detail ? `：${detail}` : ''));
+        if (res.status === 429) throw httpError(502, '请求过于频繁或额度不足（HTTP 429）');
+        if ((res.status === 400 || res.status === 422) && /model|not.?found/i.test(detail)) throw httpError(502, '模型不存在或名称错误' + (detail ? `：${detail}` : ''));
+        throw httpError(502, `连接失败（HTTP ${res.status}）` + (detail ? `：${detail}` : ''));
+      } catch (e) {
+        if (e && e.status) throw e;
+        if (e && e.name === 'AbortError') throw httpError(504, '连接超时（15 秒），请检查地址或网络');
+        throw httpError(502, `地址不通：${e.message}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    'POST /api/import/ai-analyze': async (_b, _p, req) => {
+      const MAX = 10 * 1024 * 1024;
+      const buf = await readRaw(req, MAX);
+      const parts = parseMultipart(buf, req.headers['content-type']);
+      const file = parts.find((x) => x.name === 'file' && x.filename && x.body.length > 0);
+      if (!file) throw httpError(400, '缺少文件字段 file');
+      const structure = extractWorkbookStructure(file.body);
+      const mapping = await callAi(structure);
+      const parsed = parseWorkbook(file.body, mapping);
+      const token = genId('imp');
+      importCache.set(token, parsed);
+      setTimeout(() => importCache.delete(token), 5 * 60 * 1000);
+      const { _parsed, ...summary } = parsed;
+      return { token, ...summary, ai: mapping };
     },
     'POST /api/ledgers/:id/share': async (body, p) => {
       const userId = body.userId || '*';

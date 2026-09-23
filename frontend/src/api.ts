@@ -167,4 +167,21 @@ export interface ImportPreview {
   newAccounts: string[]
   newMembers: string[]
   warnings: string[]
+  ai?: AiMapping
+}
+
+export interface AiMapping {
+  sheets: {
+    sheet: string
+    type: string
+    headerRow: number
+    fields: Record<string, string>
+  }[]
+}
+
+export interface AiConfig {
+  url: string
+  model: string
+  hasKey: boolean
+  keyMask: string
 }

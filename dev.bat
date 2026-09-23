@@ -1,14 +1,13 @@
 @echo off
-chcp 65001 >nul
-rem ===== 司农记账 - 本地一键调试 =====
-rem 后端 : http://127.0.0.1:18099  (数据目录 .devdb，不影响真机)
-rem 前端 : http://localhost:5173  (vite 热更新，/api 自动代理到后端)
-rem 调试满意后：cd frontend && npm run build，再拷到 app\www 更新后 fnpack build 装机
-
+rem ===== sinong local dev =====
+rem backend : http://127.0.0.1:18099 (data dir .devdb)
+rem frontend: http://localhost:5173 (vite HMR)
+rem NOTE: keep this file pure ASCII - Chinese chars break cmd parsing on GBK console.
 set ROOT=%~dp0
 start "sinong-backend" cmd /k "cd /d %ROOT% && node app\server\server.js --port 18099 --data-dir .devdb"
 start "sinong-frontend" cmd /k "cd /d %ROOT%frontend && npm run dev"
-
 echo.
-echo 后端 18099 与前端 5173 已启动，浏览器打开 http://localhost:5173/
-echo 关闭方式：分别关掉两个黑色窗口即可
+echo backend 18099 and frontend 5173 started.
+echo open http://localhost:5173/ in browser.
+echo stop: close the two black windows.
+pause

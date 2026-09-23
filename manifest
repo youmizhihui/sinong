@@ -1,7 +1,7 @@
 appname=sinong
-version=0.0.3
+version=1.0.0
 display_name=司农记账
-desc=本地优先的家庭记账应用。支持私人账本与共享账本，数据只保存在你自己的飞牛 NAS 上，不经过任何第三方服务器，无广告。
+desc=本地优先的家庭记账应用。支持私人账本与共享账本，数据只保存在你自己的飞牛 NAS 上，不经过任何第三方服务器，无广告。v1.0.0 新增：AI 账单格式识别（规则优先，可手动触发 AI 再识别）；常用 AI 服务快捷配置（DeepSeek/通义千问/Kimi/智谱 GLM/OpenAI/Ollama 本地）与一键测试连接；密钥仅存本机并脱敏回显。
 source=thirdparty
 platform=all
 maintainer=有米智汇
