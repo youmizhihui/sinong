@@ -216,9 +216,20 @@ function parseJson(res, body, cb) {
 }
 
 /** 可信用户身份：网关头优先（本地调试回退 local-user；生产环境无身份返回 null） */
+/** 还原被 Node 按 latin1 解码的请求头中文（X-Trim-Username 等非 ASCII 头值） */
+function fixHeaderText(s) {
+  if (!s) return s;
+  try {
+    const utf8 = Buffer.from(String(s), 'latin1').toString('utf8');
+    return utf8.includes('\uFFFD') ? s : utf8;
+  } catch {
+    return s;
+  }
+}
+
 function getUser(req) {
   const uid = req.headers['x-trim-userid'];
-  const name = req.headers['x-trim-username'];
+  const name = fixHeaderText(req.headers['x-trim-username']);
   // 生产环境（飞牛网关）必须有可信身份；本地调试（无 TRIM_APPNAME）回退 local-user
   if (!uid && process.env.TRIM_APPNAME) return null;
   return { uid: uid || 'local-user', name: name || uid || 'local-user' };
@@ -383,6 +394,13 @@ function ensureSelfMember(user) {
     db.prepare('INSERT INTO member (id,name,relation,fnos_uid,sort,created_by,created_at) VALUES (?,?,?,?,?,?,?)')
       .run(id, user.name || uid, 'self', uid, 0, uid, now);
     m = db.prepare('SELECT * FROM member WHERE id = ?').get(id);
+  } else {
+    // 修复历史乱码成员名（早期版本 X-Trim-Username 被 latin1 解码导致中文名乱码）
+    const fixed = fixHeaderText(m.name);
+    if (fixed !== m.name) {
+      db.prepare('UPDATE member SET name=? WHERE id=?').run(fixed, m.id);
+      m.name = fixed;
+    }
   }
   // 用户无任何可见账本时，自动创建一个私有日常账本
   const has = db.prepare(`
