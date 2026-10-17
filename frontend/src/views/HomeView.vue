@@ -4,7 +4,7 @@ import { ref, computed, onMounted, onActivated, onDeactivated } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, type Entry, type Member, type Ledger } from '../api'
 import { store, loadSettings, fmtMoney } from '../store'
-import { Eye, EyeOff, ReceiptText, BookOpen, ChevronDown, ChevronLeft, ChevronRight, X, ArrowUp, ArrowLeftRight } from 'lucide-vue-next'
+import { Eye, EyeOff, ReceiptText, BookOpen, ChevronDown, ChevronLeft, ChevronRight, X, ArrowUp, ArrowLeftRight, Search } from 'lucide-vue-next'
 import { iconForCat } from '../catIcons'
 
 const router = useRouter()
@@ -113,6 +113,14 @@ function calPick(day: number) {
 }
 function goCalendar() { router.push('/calendar') }
 
+/** 搜索：回车/搜索按钮跳转搜索页 */
+const searchText = ref('')
+function doSearch() {
+  const q = searchText.value.trim()
+  if (!q) return
+  router.push({ path: '/search', query: { q } })
+}
+
 /** 本月数据（固定当前自然月） */
 const month = computed(() => {
   let income = 0, expense = 0, refund = 0
@@ -207,6 +215,19 @@ onDeactivated(() => {
 <template>
   <div class="page home">
     <div class="home-left">
+    <!-- 搜索（备注/分类/成员，回车或点搜索按钮跳转结果页） -->
+    <div class="search-card card">
+      <Search :size="16" class="sb-ico" />
+      <input
+        v-model="searchText"
+        type="search"
+        enterkeyhint="search"
+        class="sb-input"
+        placeholder="搜索备注、分类、成员"
+        @keydown.enter="doSearch"
+      />
+      <van-button size="small" round type="primary" class="sb-btn" @click="doSearch">搜索</van-button>
+    </div>
     <!-- 本月收支（顶部集成账本切换） -->
     <div class="hero card">
       <div class="hero-head">
@@ -345,6 +366,10 @@ onDeactivated(() => {
   color: var(--brand); font-size: 13px;
 }
 .hero { background: linear-gradient(135deg, var(--brand) 0%, #FF8E5E 100%); border: none; color: #fff; }
+.search-card { display: flex; align-items: center; gap: 8px; padding: 9px 12px 9px 14px; }
+.sb-ico { color: var(--text2); flex-shrink: 0; }
+.sb-input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; font-size: 14px; color: var(--text); }
+.sb-btn { flex-shrink: 0; }
 .hero-head { display: flex; justify-content: space-between; align-items: center; }
 .hero-ledger {
   display: inline-flex; align-items: center; gap: 6px;

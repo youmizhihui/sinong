@@ -1126,6 +1126,7 @@ function createRouter(user) {
       const memberId = u.searchParams.get('memberId');
       const accountId = u.searchParams.get('accountId');
       const month = u.searchParams.get('month'); // YYYY-MM，传了则返回该月全量（月历/汇总用）
+      const keyword = (u.searchParams.get('keyword') || '').trim(); // 搜索：备注或分类名
       const limit = month ? 5000 : Math.min(parseInt(u.searchParams.get('limit') || '500', 10), 5000);
       const offset = parseInt(u.searchParams.get('offset') || '0', 10);
       const where = ['1=1']; const vals = [];
@@ -1137,6 +1138,12 @@ function createRouter(user) {
       if (flowType) { where.push('flow_type=?'); vals.push(flowType); }
       if (categoryId) { where.push('category_id=?'); vals.push(categoryId); }
       if (memberId) { where.push('member_id=?'); vals.push(memberId); }
+      if (keyword) {
+        // 备注包含关键词，或分类（子分类/父分类）名称包含关键词，或成员名称包含关键词
+        // （member_id 为空的记录视为"自己"，命中"自己"时一并纳入）
+        where.push('(note LIKE ? OR category_id IN (SELECT id FROM category WHERE name LIKE ? OR parent_id IN (SELECT id FROM category WHERE name LIKE ?)) OR member_id IN (SELECT id FROM member WHERE name LIKE ?) OR (member_id IS NULL AND (SELECT COUNT(*) FROM member WHERE name LIKE ?) > 0))');
+        vals.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+      }
       const rows = db.prepare(`SELECT * FROM entry WHERE ${where.join(' AND ')} ORDER BY entry_date DESC, created_at DESC LIMIT ? OFFSET ?`).all(...vals, limit, offset);
       const total = db.prepare(`SELECT COUNT(*) AS n FROM entry WHERE ${where.join(' AND ')}`).get(...vals).n;
       const entries = rows.map(decorateEntry);
@@ -1147,7 +1154,21 @@ function createRouter(user) {
         else if (r.flow_type === 'expense') expense += r.amount;
         else if (r.flow_type === 'refund') refund += r.amount;
       }
-      return { entries, total, hasMore: offset + rows.length < total, summary: { income, expense, refund, netExpense: expense - refund } };
+      // 搜索聚合统计（按全部命中行统计，不受分页影响）
+      let search = null;
+      if (keyword) {
+        const srows = db.prepare(`SELECT flow_type, amount FROM entry WHERE ${where.join(' AND ')}`).all(...vals);
+        const agg = { count: srows.length, expense: 0, income: 0, transfer: 0, refund: 0, netExpense: 0 };
+        for (const r of srows) {
+          if (r.flow_type === 'expense') agg.expense += r.amount;
+          else if (r.flow_type === 'income') agg.income += r.amount;
+          else if (r.flow_type === 'transfer') agg.transfer += r.amount;
+          else if (r.flow_type === 'refund') agg.refund += r.amount;
+        }
+        agg.netExpense = agg.expense - agg.refund;
+        search = agg;
+      }
+      return { entries, total, hasMore: offset + rows.length < total, summary: { income, expense, refund, netExpense: expense - refund }, search };
     },
     'POST /api/entries': async (body, _p, req) => createEntry(getUser(req), body),
     'GET /api/entries/:id': (_b, p) => {

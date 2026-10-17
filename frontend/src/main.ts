@@ -1,12 +1,12 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
-import { Popup, Skeleton } from 'vant'
+import { Popup, Skeleton, Button } from 'vant'
 import '@vant/touch-emulator'
 import 'vant/lib/index.css'
 import './assets/main.css'
 
-const app = createApp(App).use(router).use(Popup).use(Skeleton)
+const app = createApp(App).use(router).use(Popup).use(Skeleton).use(Button)
 
 // PC 端 vant Picker 修复：vant Picker 只监听 touch 事件，PC 鼠标没有 touch。
 // 官方方案 @vant/touch-emulator 会把鼠标事件转成 touch 事件（上面已全局引入），

@@ -139,6 +139,23 @@ export interface EntrySummary {
   netExpense: number
 }
 
+export interface SearchAgg {
+  count: number
+  expense: number
+  income: number
+  transfer: number
+  refund: number
+  netExpense: number
+}
+
+export interface EntriesData {
+  entries: Entry[]
+  total: number
+  hasMore: boolean
+  summary: EntrySummary
+  search?: SearchAgg | null
+}
+
 export interface Member {
   id: string
   name: string
