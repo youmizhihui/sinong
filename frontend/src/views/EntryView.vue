@@ -3,11 +3,11 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showToast, showConfirmDialog, DatePicker as VanDatePicker, TimePicker as VanTimePicker, PickerGroup as VanPickerGroup } from 'vant'
 import { api, type Account, type Category, type AccountsData, type Entry, type Member, type Attachment, type PlatformItem } from '../api'
-import { iconForCat, iconForGroup } from '../catIcons'
+import { iconForCat } from '../catIcons'
 import { store, fmtMoney } from '../store'
 import {
   ArrowLeft, ArrowRight, Utensils, Check,
-  CalendarDays, Wallet, Delete, X, ChevronDown, Camera, BadgeCheck, User, ShoppingBag,
+  CalendarDays, Wallet, Delete, X, Camera, BadgeCheck, User, ShoppingBag, Star,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -27,7 +27,6 @@ const memberId = ref('')          // 成员（空 = 自己）
 const platform = ref('')          // 消费平台（空 = 不选）
 
 // 弹层开关
-const showCat = ref(false)
 const showAcc = ref(false)
 const showDate = ref(false)
 const accPickTarget = ref<'from' | 'to'>('from')
@@ -75,10 +74,6 @@ watch(amountText, (v) => {
 
 // 分类
 const catGroups = computed(() => cats.value.filter((c) => !c.parent_id))
-const activeChildren = computed(() => {
-  const g = cats.value.find((c) => c.id === activeGroup.value)
-  return (g?.children || []).map((c) => ({ ...c, parentIcon: g?.icon }))
-})
 const currentCat = computed(() =>
   cats.value.flatMap((g) => g.children || []).find((c) => c.id === categoryId.value),
 )
@@ -87,12 +82,18 @@ const currentCatIcon = computed(() => {
   const g = cats.value.find((x) => x.id === activeGroup.value)
   return currentCat.value ? { ...currentCat.value, parentIcon: g?.icon } : undefined
 })
-// 常用分类：常用（is_frequent）优先，其余补齐，取前 12
+// 常用分类：常用（is_frequent）优先，其余补齐，全部展示（网格内滚动）
 const quickCats = computed(() => {
   const kids = cats.value.flatMap((g) => (g.children || []).map((c) => ({ ...c, parentIcon: g.icon })))
-  return [...kids]
-    .sort((a, b) => (b.is_frequent ?? 0) - (a.is_frequent ?? 0))
-    .slice(0, 12)
+  return [...kids].sort((a, b) => (b.is_frequent ?? 0) - (a.is_frequent ?? 0))
+})
+
+// 一级分类 tab：'frequent' 为常用，其余为一级分类 id
+const activeTab = ref('frequent')
+const shownCats = computed(() => {
+  if (activeTab.value === 'frequent') return quickCats.value
+  const g = cats.value.find((c) => c.id === activeTab.value)
+  return (g?.children || []).map((c) => ({ ...c, parentIcon: g?.icon }))
 })
 
 // 账户
@@ -182,6 +183,7 @@ async function loadCats(t: 'expense' | 'income') {
   const catData = await api.get<{ groups: Category[] }>(`categories?type=${t}`)
   cats.value = catData.groups
   activeGroup.value = catGroups.value[0]?.id || ''
+  activeTab.value = 'frequent'
   // 默认选中第一个二级分类（支出=早餐，收入=首项），实现快速记账
   const kids = catData.groups.flatMap((g) => g.children || [])
   if (kids.length && !kids.some((k) => k.id === categoryId.value)) {
@@ -197,7 +199,6 @@ function pickCategory(id: string) {
     const parent = cats.value.find((c) => c.children?.some((x) => x.id === id))
     if (parent) activeGroup.value = parent.id
   }
-  showCat.value = false
 }
 
 function openAccPicker(target: 'from' | 'to') {
@@ -423,30 +424,48 @@ onMounted(async () => {
 
     <!-- 金额行：左分类标签 + 中金额（整体包裹，点标签弹分类） -->
     <div class="amount-box">
-      <button v-if="flowType !== 'transfer'" class="cur-cat-tag" :class="{ placeholder: !categoryId }" @click="showCat = true">
+      <div v-if="flowType !== 'transfer'" class="cur-cat-tag" :class="{ placeholder: !categoryId }">
         <span class="tag-icon">
           <component v-if="currentCatIcon" :is="iconForCat(currentCatIcon)" :size="14" />
           <Utensils v-else :size="14" />
         </span>
         <span>{{ currentCatName || '选择分类' }}</span>
-        <ChevronDown :size="13" class="tag-arrow" />
-      </button>
+      </div>
       <input v-model="amountText" inputmode="decimal" placeholder="0.00" class="num" />
     </div>
 
-    <!-- 常用分类（数据加载时仅此区域显示骨架） -->
+    <!-- 分类：一级 tab（常用置顶）+ 二级分类网格（定高 3 行，超出滚动） -->
     <template v-if="flowType !== 'transfer'">
       <van-skeleton v-if="initLoading" title :row="3" style="padding: 12px 0;" />
-      <div v-else class="quick-grid">
-        <button
-          v-for="c in quickCats" :key="c.id"
-          class="quick-item" :class="{ sel: categoryId === c.id }"
-          @click="pickCategory(c.id)"
-        >
-          <span class="q-icon"><component :is="iconForCat(c)" :size="14" /></span>
-          <span>{{ c.name }}</span>
-        </button>
-      </div>
+      <template v-else>
+        <div class="cat-tabs">
+          <button
+            class="cat-tab" :class="{ active: activeTab === 'frequent' }"
+            @click="activeTab = 'frequent'"
+          >
+            <Star :size="13" />
+            <span>常用</span>
+          </button>
+          <button
+            v-for="g in catGroups" :key="g.id"
+            class="cat-tab" :class="{ active: activeTab === g.id }"
+            @click="activeTab = g.id"
+          >
+            <component :is="iconForCat(g)" :size="13" />
+            <span>{{ g.name }}</span>
+          </button>
+        </div>
+        <div class="quick-grid cat-scroll">
+          <button
+            v-for="c in shownCats" :key="c.id"
+            class="quick-item" :class="{ sel: categoryId === c.id }"
+            @click="pickCategory(c.id)"
+          >
+            <span class="q-icon"><component :is="iconForCat(c)" :size="14" /></span>
+            <span>{{ c.name }}</span>
+          </button>
+        </div>
+      </template>
     </template>
 
     <!-- 转账：转出/转入 一行 -->
@@ -537,35 +556,6 @@ onMounted(async () => {
         {{ done ? '✓ 已保存' : saving ? '保存中…' : '保存' }}
       </button>
     </div>
-
-    <!-- 分类弹出层 -->
-    <van-popup v-model:show="showCat" position="center" round class="cat-pop">
-      <div class="pop-head">
-        <span class="pop-title">选择分类</span>
-        <button class="pop-close" @click="showCat = false"><X :size="18" /></button>
-      </div>
-      <div class="cat-tabs">
-        <button
-          v-for="g in catGroups" :key="g.id"
-          class="ctab" :class="{ active: activeGroup === g.id }"
-          @click="activeGroup = g.id"
-        >
-          <component :is="iconForGroup(g.icon)" :size="14" />
-          {{ g.name }}
-        </button>
-      </div>
-      <div class="cat-grid">
-        <button
-          v-for="c in activeChildren" :key="c.id"
-          class="cat-item" :class="{ sel: categoryId === c.id }"
-          @click="pickCategory(c.id)"
-        >
-          <span class="cat-icon"><component :is="iconForCat(c)" :size="16" /></span>
-          <span>{{ c.name }}</span>
-          <Check v-if="categoryId === c.id" :size="12" class="check" />
-        </button>
-      </div>
-    </van-popup>
 
     <!-- 账户弹出层（大类分组） -->
     <van-popup v-model:show="showAcc" position="bottom" round class="acc-pop">
@@ -682,10 +672,24 @@ onMounted(async () => {
 .tag-arrow { color: currentColor; opacity: 0.65; flex-shrink: 0; }
 
 /* 常用分类 */
+.cat-tabs {
+  display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 8px;
+  scrollbar-width: none;
+}
+.cat-tabs::-webkit-scrollbar { display: none; }
+.cat-tab {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 12px; border-radius: 14px;
+  background: var(--card); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text2); white-space: nowrap;
+}
+.cat-tab.active { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
 .quick-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
   gap: 8px;
 }
+/* 二级分类定高约 3 行，超出纵向滚动，避免内容随分类数跳动 */
+.cat-scroll { max-height: 180px; overflow-y: auto; padding-bottom: 2px; }
 .quick-item {
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   padding: 8px 4px; background: var(--card); border: 1px solid var(--border);
@@ -762,29 +766,6 @@ onMounted(async () => {
 .pop-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 8px; }
 .pop-title { font-size: 15px; font-weight: 600; }
 .pop-close { padding: 4px; color: var(--text2); }
-
-/* 分类弹出层 */
-.cat-pop { max-height: 70vh; width: 92vw; max-width: 420px; display: flex; flex-direction: column; }
-.cat-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 4px 16px 8px; scrollbar-width: none; }
-.ctab {
-  flex-shrink: 0; padding: 6px 12px; border-radius: 16px;
-  background: var(--bg); border: 1px solid var(--border); font-size: 12px; color: var(--text2);
-  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
-}
-.ctab.active { background: var(--brand-soft); color: var(--brand); border-color: var(--brand); font-weight: 600; }
-.cat-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
-  gap: 8px; padding: 4px 16px 16px; overflow-y: auto;
-}
-.cat-item {
-  position: relative;
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 10px 4px; background: var(--card); border: 1px solid var(--border);
-  border-radius: 12px; font-size: 11px; color: var(--text);
-}
-.cat-item.sel { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); font-weight: 600; }
-.cat-icon { display: flex; }
-.check { position: absolute; top: 4px; right: 4px; }
 
 /* 日期时间弹出层 */
 /* 图片预览（键盘上方） */
