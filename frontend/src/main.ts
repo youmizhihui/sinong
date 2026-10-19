@@ -8,37 +8,6 @@ import './assets/main.css'
 
 const app = createApp(App).use(router).use(Popup).use(Skeleton).use(Button)
 
-// PC 端 vant Picker 修复：vant Picker 只监听 touch 事件，PC 鼠标没有 touch。
-// 官方方案 @vant/touch-emulator 会把鼠标事件转成 touch 事件（上面已全局引入），
-// 这里只补充滚轮切换作为辅助。
-function setupPcPickerFix() {
-  const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0
-  if (isTouch) return
-
-  document.addEventListener(
-    'wheel',
-    (e) => {
-      const col = (e.target as HTMLElement).closest('.van-picker-column') as HTMLElement | null
-      if (!col) return
-      e.preventDefault()
-      const items = col.querySelectorAll<HTMLElement>('.van-picker-column__item')
-      if (!items.length) return
-      const wrapper = col.querySelector<HTMLElement>('.van-picker-column__wrapper')
-      const itemH = items[0].offsetHeight || 44
-      let curIdx = 0
-      if (wrapper) {
-        const m = wrapper.style.transform.match(/translate3d\([^,]+,\s*(-?[\d.]+)px/)
-        if (m) curIdx = Math.round(-parseFloat(m[1]) / itemH)
-      }
-      const delta = e.deltaY > 0 ? 1 : -1
-      const next = Math.max(0, Math.min(items.length - 1, curIdx + delta))
-      items[next].click()
-    },
-    { passive: false },
-  )
-}
-setupPcPickerFix()
-
 // PC 端滚动容器拖动支持：普通 CSS 滚动容器（分类网格、账户列表等）在 PC 上按住鼠标
 // 会选中文字而不是滚动。这里实现"按住拖动滚动"（类触屏体验），并阻止文本选择。
 function setupPcDragScroll() {

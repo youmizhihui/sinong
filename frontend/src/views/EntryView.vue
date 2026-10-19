@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { showToast, showConfirmDialog, DatePicker as VanDatePicker, TimePicker as VanTimePicker } from 'vant'
+import { showToast, showConfirmDialog, DatePicker as VanDatePicker, TimePicker as VanTimePicker, PickerGroup as VanPickerGroup } from 'vant'
 import { api, type Account, type Category, type AccountsData, type Entry, type Member, type Attachment, type PlatformItem } from '../api'
 import { iconForCat, iconForGroup } from '../catIcons'
 import { store, fmtMoney } from '../store'
 import {
   ArrowLeft, ArrowRight, Utensils, Check,
-  CalendarDays, Wallet, Delete, X, ChevronDown, Clock, Camera, BadgeCheck, User, ShoppingBag,
+  CalendarDays, Wallet, Delete, X, ChevronDown, Camera, BadgeCheck, User, ShoppingBag,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -30,12 +30,10 @@ const platform = ref('')          // 消费平台（空 = 不选）
 const showCat = ref(false)
 const showAcc = ref(false)
 const showDate = ref(false)
-const showYM = ref(false)
-const showTime = ref(false)
 const accPickTarget = ref<'from' | 'to'>('from')
 const isPc = ref(false)
 const initLoading = ref(true)
-function onPcResize() { isPc.value = window.innerWidth >= 768 }
+function onPcResize() { isPc.value = window.innerWidth >= 768; recenterPopup() }
 
 const accounts = ref<Account[]>([])
 const accGroups = ref<AccountsData['groups']>([])
@@ -103,8 +101,7 @@ const fromAccName = computed(() => accounts.value.find((a) => a.id === accountId
 const toAccName = computed(() => accounts.value.find((a) => a.id === toAccountId.value)?.name || '')
 const memberName = computed(() => members.value.find((m) => m.id === memberId.value)?.name || '自己')
 
-// 日期时间（月历 + 年月下拉 + 时/分）
-const today = new Date()
+// 日期时间（PickerGroup：左时间、右日期）
 /** 首页月历选中的日期（YYYY-MM-DD）优先：选中日 + 当前时刻；消费后清空 */
 const defaultDate = store.entryDefaultDate
 store.entryDefaultDate = null
@@ -117,62 +114,38 @@ const initDate = (() => {
   return new Date()
 })()
 const entryDate = ref(initDate)
-const pickY = ref(entryDate.value.getFullYear())
-const pickM = ref(entryDate.value.getMonth() + 1)
-const pickD = ref(entryDate.value.getDate())
-const hour = ref(entryDate.value.getHours())
-const minute = ref(entryDate.value.getMinutes())
 
-const WEEK_HEADER = ['一', '二', '三', '四', '五', '六', '日']
-const ymPickerValue = ref([String(pickY.value), String(pickM.value).padStart(2, '0')])
-const timePickerValue = ref([String(hour.value).padStart(2, '0'), String(minute.value).padStart(2, '0')])
-const dayCells = computed(() => {
-  const first = new Date(pickY.value, pickM.value - 1, 1).getDay()
-  const lead = first === 0 ? 6 : first - 1
-  const dim = new Date(pickY.value, pickM.value, 0).getDate()
-  const cells: (number | null)[] = []
-  for (let i = 0; i < lead; i++) cells.push(null)
-  for (let d = 1; d <= dim; d++) cells.push(d)
-  return cells
-})
-function isToday(d: number | null) {
-  return !!d && pickY.value === today.getFullYear() && pickM.value === today.getMonth() + 1 && d === today.getDate()
+// 弹层定位：手机端全宽底部弹出；PC 端与记账内容块（.page.entry）同宽同左缘
+const popupLeft = ref('0px')
+const popupWidth = ref('100%')
+function recenterPopup() {
+  if (!isPc.value) return
+  const el = document.querySelector('.entry')
+  if (!el) return
+  const r = el.getBoundingClientRect()
+  popupLeft.value = `${r.left}px`
+  popupWidth.value = `${r.width}px`
 }
-function isSel(d: number | null) {
-  return !!d && d === pickD.value
-}
+
+// PickerGroup：左时间、右日期；年份范围 1949 ~ 3000
+const minDate = new Date(1949, 0, 1)
+const maxDate = new Date(3000, 11, 31)
+const groupTimeValue = ref<string[]>(['00', '00'])
+const groupDateValue = ref<string[]>(['2025', '01', '01'])
+
 function openDatePicker() {
   const d = entryDate.value
-  pickY.value = d.getFullYear()
-  pickM.value = d.getMonth() + 1
-  pickD.value = d.getDate()
-  hour.value = d.getHours()
-  minute.value = d.getMinutes()
+  const p = (n: number) => String(n).padStart(2, '0')
+  groupTimeValue.value = [p(d.getHours()), p(d.getMinutes())]
+  groupDateValue.value = [String(d.getFullYear()), p(d.getMonth() + 1), p(d.getDate())]
+  recenterPopup()
   showDate.value = true
 }
-function confirmDateTime() {
-  entryDate.value = new Date(pickY.value, pickM.value - 1, pickD.value, hour.value, minute.value)
+function confirmGroup() {
+  const [hh, mm] = groupTimeValue.value
+  const [y, mo, dd] = groupDateValue.value
+  entryDate.value = new Date(Number(y), Number(mo) - 1, Number(dd), Number(hh), Number(mm))
   showDate.value = false
-}
-function openYMPicker() {
-  ymPickerValue.value = [String(pickY.value), String(pickM.value).padStart(2, '0')]
-  showYM.value = true
-}
-function onYMConfirm({ selectedValues }: { selectedValues: string[] }) {
-  pickY.value = Number(selectedValues[0])
-  pickM.value = Number(selectedValues[1])
-  const dim = new Date(pickY.value, pickM.value, 0).getDate()
-  if (pickD.value > dim) pickD.value = dim
-  showYM.value = false
-}
-function onTimeConfirm({ selectedValues }: { selectedValues: string[] }) {
-  hour.value = Number(selectedValues[0])
-  minute.value = Number(selectedValues[1])
-  showTime.value = false
-}
-function openTimePicker() {
-  timePickerValue.value = [String(hour.value).padStart(2, '0'), String(minute.value).padStart(2, '0')]
-  showTime.value = true
 }
 function fmtEntryDate(d: Date) {
   const p = (n: number) => String(n).padStart(2, '0')
@@ -403,11 +376,6 @@ async function loadEdit() {
   const d = new Date(e.entryDate.replace(' ', 'T'))
   if (!Number.isNaN(d.getTime())) {
     entryDate.value = d
-    pickY.value = d.getFullYear()
-    pickM.value = d.getMonth() + 1
-    pickD.value = d.getDate()
-    hour.value = d.getHours()
-    minute.value = d.getMinutes()
   }
   if (flowType.value !== 'transfer') await loadCats(flowType.value)
 }
@@ -662,57 +630,18 @@ onMounted(async () => {
       </div>
     </van-popup>
 
-    <!-- 年月选择弹出层 -->
-    <van-popup v-model:show="showYM" position="bottom" round>
-      <VanDatePicker
-        v-model="ymPickerValue"
-        title="选择年月"
-        :columns-type="['year', 'month']"
-        :min-date="new Date(2000, 0, 1)"
-        :max-date="new Date(2100, 11, 31)"
-        @confirm="onYMConfirm"
-        @cancel="showYM = false"
-      />
-    </van-popup>
-
-    <!-- 日期时间弹出层：单月月历 + 时分 -->
-    <van-popup v-model:show="showDate" position="bottom" round class="dt-pop">
-      <div class="pop-head">
-        <span class="pop-title">选择日期时间</span>
-        <button class="pop-close" @click="showDate = false"><X :size="18" /></button>
-      </div>
-      <div class="dt-body">
-        <button class="ym-btn" @click="openYMPicker">
-          {{ pickY }}年{{ pickM }}月 <ChevronDown :size="14" />
-        </button>
-          <div class="cal-week">
-            <span v-for="w in WEEK_HEADER" :key="w">{{ w }}</span>
-          </div>
-          <div class="cal-grid">
-            <button
-              v-for="(d, i) in dayCells" :key="i"
-              class="cal-day" :class="{ blank: !d, today: isToday(d), sel: isSel(d) }"
-              @click="d && (pickD = d)"
-            >{{ d || '' }}</button>
-          </div>
-          <div class="dt-time-row">
-            <button class="chip" @click="openTimePicker">
-              <Clock :size="14" />
-              {{ String(hour).padStart(2, '0') }}:{{ String(minute).padStart(2, '0') }}
-            </button>
-            <button class="dt-confirm" @click="confirmDateTime">确定</button>
-          </div>
-      </div>
-    </van-popup>
-
-    <!-- 时间选择 -->
-    <van-popup v-model:show="showTime" position="bottom" round>
-      <VanTimePicker
-        v-model="timePickerValue"
-        title="选择时间"
-        @confirm="onTimeConfirm"
-        @cancel="showTime = false"
-      />
+    <!-- 日期时间弹出层：底部弹出；PC 端与记账内容块同宽 -->
+    <van-popup
+      v-model:show="showDate"
+      position="bottom"
+      :style="isPc ? { left: popupLeft, width: popupWidth } : {}"
+      round
+      class="dt-popup"
+    >
+      <VanPickerGroup :tabs="['时间', '日期']" @cancel="showDate = false" @confirm="confirmGroup">
+        <VanTimePicker v-model="groupTimeValue" />
+        <VanDatePicker v-model="groupDateValue" :min-date="minDate" :max-date="maxDate" />
+      </VanPickerGroup>
     </van-popup>
   </div>
 </template>
@@ -858,29 +787,6 @@ onMounted(async () => {
 .check { position: absolute; top: 4px; right: 4px; }
 
 /* 日期时间弹出层 */
-.dt-pop { max-height: 80vh; display: flex; flex-direction: column; }
-.dt-body { padding: 4px 16px 16px; }
-.ym-btn {
-  display: flex; align-items: center; gap: 4px; margin: 0 auto 10px;
-  padding: 6px 14px; background: var(--bg); border: 1px solid var(--border);
-  border-radius: 16px; font-size: 14px; font-weight: 600; color: var(--text);
-}
-.cal-week { display: grid; grid-template-columns: repeat(7, 1fr); }
-.cal-week span { text-align: center; font-size: 11px; color: var(--text2); padding: 6px 0; }
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
-.cal-day {
-  height: 38px; text-align: center; font-size: 13px; color: var(--text);
-  border-radius: 10px;
-}
-.cal-day.blank { visibility: hidden; }
-.cal-day.today { color: var(--brand); font-weight: 700; }
-.cal-day.sel { background: var(--brand); color: #fff; font-weight: 700; }
-.dt-time-row { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; }
-.dt-confirm {
-  padding: 9px 28px; border-radius: 12px; background: var(--brand);
-  color: #fff; font-size: 14px; font-weight: 600;
-}
-
 /* 图片预览（键盘上方） */
 .img-area { display: flex; gap: 8px; flex-wrap: wrap; padding: 2px 0 4px; }
 .img-thumb {
