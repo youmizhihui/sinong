@@ -46,7 +46,11 @@ function openAdd() {
 }
 function openEdit(m: Member) {
   if (m.relation === 'self') {
-    showDialog({ title: '我', message: '「我」是你本人的成员，可在记一笔中选择，不可删除。' })
+    if (m.isMe) {
+      showDialog({ title: '我', message: '「我」是你本人的成员，可在记一笔中选择，不可删除。' })
+    } else {
+      showDialog({ title: '其他用户', message: `「${m.name}」是其他飞牛用户的本人成员，仅用于区分，不可编辑或删除。` })
+    }
     return
   }
   editing.value = m
@@ -117,8 +121,10 @@ async function remove(m: Member) {
           <div class="row-main">
             <div class="row-title">{{ m.name }}</div>
             <div class="muted">
-              {{ relLabel(m.relation) }}
-              <template v-if="m.relation === 'self'"> · 本人</template>
+              {{ relLabel(m.relation) }}<template v-if="m.relation === 'self'">
+                <template v-if="m.isMe"> · 本人</template>
+                <template v-else-if="m.fnos_uid"> · 其他用户</template>
+              </template>
             </div>
           </div>
           <button

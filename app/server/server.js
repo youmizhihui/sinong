@@ -24,7 +24,7 @@ const AI_SYSTEM_PROMPT = `你是 Excel 记账账单格式分析专家。用户�
 请分析每个 sheet：
 1. 业务类型 type：expense(支出)/income(收入)/transfer(转账)/loan(借贷)/repay(收款还款)/skip(非账单数据，跳过)
 2. 表头行 headerRow：数据表头所在行号（1 起始）。若样本中没有明显表头，根据内容推断数据起始行。
-3. 字段映射 fields：date(日期)/amount(金额)/category(分类或类别，可含大类小类)/categoryParent(大类)/categoryChild(小类)/note(备注描述)/account(账户)/accountFrom(转出账户)/accountTo(转入账户)/member(成员或消费人)/type(类型列，若每行用类型区分收支)/merchant(商家)/reimburse(报销标记)。
+3. 字段映射 fields：date(日期)/amount(金额)/category(分类或类别，可含大类小类)/categoryParent(大类)/categoryChild(小类)/note(备注描述)/account(账户)/accountFrom(转出账户)/accountTo(转入账户)/member(成员或消费人)/type(类型列，若每行用类型区分收支)/merchant(商家)/platform(消费平台或平台)/reimburse(报销标记)。
    fields 的值填列字母（如 A、C）或表头列名（如"消费日期"）。
    category 与 categoryParent/categoryChild 至少给一个；分不清就给 category。
 4. 只返回 JSON，不要任何其他文字：
@@ -424,7 +424,7 @@ function ensureSelfMember(user) {
 /** 记一笔（支出/收入/转账） */
 function createEntry(user, body) {
   const db = getDb();
-  const { ledgerId, accountId, toAccountId, flowType, amount, categoryId, note, counterparty, memberId, entryDate, reimbursable, reimburseTarget } = body;
+  const { ledgerId, accountId, toAccountId, flowType, amount, categoryId, note, counterparty, memberId, entryDate, reimbursable, reimburseTarget, platform } = body;
   if (!ledgerId || !accountId || !flowType || !amount) throw httpError(400, '缺少必填字段');
   requireLedgerAccess(user.uid, ledgerId);
   if (!['expense', 'income', 'transfer'].includes(flowType)) throw httpError(400, '无效流水类型');
@@ -436,10 +436,10 @@ function createEntry(user, body) {
   const date = entryDate || today();
   const selfMember = ensureSelfMember(user);
   db.prepare(`INSERT INTO entry (id,ledger_id,account_id,to_account_id,flow_type,amount,category_id,note,counterparty,
-    recorded_by,member_id,reimbursable,reimburse_target,entry_date,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    recorded_by,member_id,platform,reimbursable,reimburse_target,entry_date,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(id, ledgerId, accountId, toAccountId || null, flowType, amount, categoryId || null,
-      note || '', counterparty || '自己', user.uid, memberId || selfMember.id,
+      note || '', counterparty || '自己', user.uid, memberId || selfMember.id, platform || null,
       flowType === 'expense' && reimbursable ? 1 : 0, flowType === 'expense' ? (reimburseTarget || null) : null,
       date, now, now);
   return getEntryById(id);
@@ -547,6 +547,7 @@ function updateEntry(user, id, body) {
   if (body.note !== undefined) push('note', body.note);
   if (body.counterparty !== undefined) push('counterparty', body.counterparty);
   if (body.memberId !== undefined) push('member_id', body.memberId || null);
+  if (body.platform !== undefined) push('platform', body.platform || null);
   if (body.entryDate !== undefined) push('entry_date', body.entryDate);
   if (fields.length === 0) return getEntryById(id);
 
@@ -635,6 +636,7 @@ function decorateEntry(e) {
     counterparty: e.counterparty,
     recordedBy: e.recorded_by,
     memberId: e.member_id,
+    platform: e.platform || null,
     reimbursable: !!e.reimbursable,
     reimburseTarget: e.reimburse_target,
     reimburseStatus: e.reimburse_status,
@@ -664,6 +666,39 @@ function createRouter(user) {
     'GET /api/health': (_b, _p, req) => {
       const u = getUser(req);
       return { ok: true, app: 'sinong', time: nowIso(), user: u };
+    },
+
+    // ---- 消费平台 ----
+    'GET /api/platforms': () => {
+      return db.prepare('SELECT * FROM platform ORDER BY sort, created_at').all();
+    },
+    'POST /api/platforms': (body) => {
+      const name = String(body.name || '').trim();
+      if (!name) throw httpError(400, '平台名称不能为空');
+      const dup = db.prepare('SELECT id FROM platform WHERE name=?').get(name);
+      if (dup) throw httpError(400, '该平台已存在');
+      const id = genId('pf');
+      const now = nowIso();
+      const maxSort = db.prepare('SELECT MAX(sort) AS m FROM platform').get().m || 0;
+      db.prepare('INSERT INTO platform (id,name,sort,created_at) VALUES (?,?,?,?)').run(id, name, maxSort + 1, now);
+      return db.prepare('SELECT * FROM platform WHERE id=?').get(id);
+    },
+    'PUT /api/platforms/:id': (body, p) => {
+      const plat = db.prepare('SELECT * FROM platform WHERE id=?').get(p.id);
+      if (!plat) throw httpError(404, '平台不存在');
+      const name = String(body.name || '').trim();
+      if (!name) throw httpError(400, '平台名称不能为空');
+      const dup = db.prepare('SELECT id FROM platform WHERE name=? AND id<>?').get(name, p.id);
+      if (dup) throw httpError(400, '该平台已存在');
+      db.prepare('UPDATE platform SET name=?, sort=? WHERE id=?').run(name, plat.sort, p.id);
+      return db.prepare('SELECT * FROM platform WHERE id=?').get(p.id);
+    },
+    'DELETE /api/platforms/:id': (_b, p) => {
+      const plat = db.prepare('SELECT * FROM platform WHERE id=?').get(p.id);
+      if (!plat) throw httpError(404, '平台不存在');
+      // 历史记录的消费平台为文本存储，删除选项不影响已有记录
+      db.prepare('DELETE FROM platform WHERE id=?').run(p.id);
+      return { ok: true };
     },
 
     // ---- 账户 ----
@@ -1183,7 +1218,12 @@ function createRouter(user) {
 
     // ---- 成员 ----
     'GET /api/users': () => ({ users: getUsers() }),
-    'GET /api/members': () => db.prepare('SELECT * FROM member ORDER BY sort, created_at').all(),
+    'GET /api/members': (_b, _p, req) => {
+      const user = getUser(req);
+      const rows = db.prepare('SELECT * FROM member ORDER BY sort, created_at').all();
+      // 附加 isMe：区分「当前登录用户本人」与其他 self 成员（只影响显示，不涉及创建/删除）
+      return rows.map((m) => ({ ...m, isMe: !!m.fnos_uid && m.fnos_uid === user.uid }));
+    },
     'POST /api/members': async (body, _p, req) => {
       const user = getUser(req);
       const { name, relation } = body;
@@ -1323,9 +1363,9 @@ function exportToExcel(user) {
   const memMap = new Map();
   for (const m of db.prepare('SELECT id,name FROM member').all()) memMap.set(m.id, m.name);
 
-  const expenseRows = [['日期', '分类', '子分类', '金额(元)', '账户', '成员', '备注']];
-  const incomeRows = [['日期', '分类', '子分类', '金额(元)', '账户', '成员', '备注']];
-  const transferRows = [['日期', '转出账户', '转入账户', '金额(元)', '备注']];
+  const expenseRows = [['日期', '分类', '子分类', '金额(元)', '账户', '成员', '消费平台', '备注']];
+  const incomeRows = [['日期', '分类', '子分类', '金额(元)', '账户', '成员', '消费平台', '备注']];
+  const transferRows = [['日期', '转出账户', '转入账户', '金额(元)', '消费平台', '备注']];
 
   for (const e of rows) {
     const date = e.entry_date || '';
@@ -1336,13 +1376,14 @@ function exportToExcel(user) {
     const accName = e.account_id ? accMap.get(e.account_id) || '' : '';
     const toAccName = e.to_account_id ? accMap.get(e.to_account_id) || '' : '';
     const memName = e.member_id ? memMap.get(e.member_id) || '' : '';
+    const platform = e.platform || '';
     const note = e.note || '';
     if (e.flow_type === 'expense' || e.flow_type === 'refund') {
-      expenseRows.push([date, parentName, subName, e.flow_type === 'refund' ? '-' + amount : amount, accName, memName, note]);
+      expenseRows.push([date, parentName, subName, e.flow_type === 'refund' ? '-' + amount : amount, accName, memName, platform, note]);
     } else if (e.flow_type === 'income') {
-      incomeRows.push([date, parentName, subName, amount, accName, memName, note]);
+      incomeRows.push([date, parentName, subName, amount, accName, memName, platform, note]);
     } else if (e.flow_type === 'transfer') {
-      transferRows.push([date, accName, toAccName, amount, note]);
+      transferRows.push([date, accName, toAccName, amount, platform, note]);
     }
   }
 

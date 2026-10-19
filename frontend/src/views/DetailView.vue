@@ -6,7 +6,7 @@ import { api, type Entry, type Account, type AccountsData, type Category, type M
 import { fmtMoney, store } from '../store'
 import {
   ArrowLeft, Trash2, Pencil, Undo2, BadgeCheck,
-  CalendarDays, Wallet, User, X,
+  CalendarDays, Wallet, User, X, ShoppingBag, FileText,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -234,6 +234,11 @@ async function submitReimburse() {
           <span class="info-label">成员</span>
           <span class="info-val">{{ memberName }}</span>
         </div>
+        <div v-if="entry.platform" class="info-row">
+          <span class="info-icon"><ShoppingBag :size="15" /></span>
+          <span class="info-label">消费平台</span>
+          <span class="info-val">{{ entry.platform }}</span>
+        </div>
         <div v-if="entry.note" class="info-row">
           <span class="info-icon"><FileText :size="15" /></span>
           <span class="info-label">备注</span>
@@ -361,7 +366,7 @@ async function submitReimburse() {
 .info-row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--border); }
 .info-row:last-child { border-bottom: none; }
 .info-icon { color: var(--text2); display: flex; }
-.info-label { width: 44px; flex-shrink: 0; font-size: 13px; color: var(--text2); }
+.info-label { min-width: 44px; flex-shrink: 0; font-size: 13px; color: var(--text2); }
 .info-val { flex: 1; font-size: 14px; color: var(--text); text-align: right; }
 .info-val.refund { color: var(--income); }
 .info-val.reimb-full { color: var(--income); }

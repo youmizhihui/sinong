@@ -114,6 +114,7 @@ function subLabel(e: Entry) {
   parts.push(timeHM(e))
   if (e.flowType === 'transfer') parts.push(`${e.accountName || '?'} → ${e.toAccountName || '?'}`)
   else if (e.accountName) parts.push(e.accountName)
+  if (e.platform) parts.push(e.platform)
   return parts.join(' · ')
 }
 

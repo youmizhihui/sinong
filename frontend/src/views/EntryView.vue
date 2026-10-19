@@ -2,12 +2,12 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showToast, showConfirmDialog, DatePicker as VanDatePicker, TimePicker as VanTimePicker } from 'vant'
-import { api, type Account, type Category, type AccountsData, type Entry, type Member, type Attachment } from '../api'
+import { api, type Account, type Category, type AccountsData, type Entry, type Member, type Attachment, type PlatformItem } from '../api'
 import { iconForCat, iconForGroup } from '../catIcons'
 import { store, fmtMoney } from '../store'
 import {
   ArrowLeft, ArrowRight, Utensils, Check,
-  CalendarDays, Wallet, Delete, X, ChevronDown, Clock, Camera, BadgeCheck, User,
+  CalendarDays, Wallet, Delete, X, ChevronDown, Clock, Camera, BadgeCheck, User, ShoppingBag,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -24,6 +24,7 @@ const categoryId = ref('')
 const activeGroup = ref('')
 const reimbursable = ref(false)   // 可报销标记（仅支出）
 const memberId = ref('')          // 成员（空 = 自己）
+const platform = ref('')          // 消费平台（空 = 不选）
 
 // 弹层开关
 const showCat = ref(false)
@@ -41,6 +42,9 @@ const accGroups = ref<AccountsData['groups']>([])
 const cats = ref<Category[]>([])
 const members = ref<Member[]>([])
 const showMember = ref(false)
+const showPlatform = ref(false)
+/** 消费平台列表（后端管理，用户可自定义增删改） */
+const platforms = ref<PlatformItem[]>([])
 const saving = ref(false)
 const done = ref(false)
 // 图片凭证（第一版：本地预览 + 删除；上传落库接口下一步接入）
@@ -332,6 +336,7 @@ async function doSave(resetRelations: boolean, keepEditing: boolean) {
     entryDate: fmtEntryDate(entryDate.value),
     reimbursable: flowType.value === 'expense' ? reimbursable.value : undefined,
     memberId: memberId.value || undefined,
+    platform: platform.value || undefined,
     resetRelations: editingId.value ? resetRelations : undefined,
   }
   try {
@@ -392,6 +397,7 @@ async function loadEdit() {
   categoryId.value = e.categoryId || ''
   reimbursable.value = !!e.reimbursable
   memberId.value = e.memberId || ''
+  platform.value = e.platform || ''
   existing.value = e.attachments || []
   // 日期回填（"YYYY-MM-DD HH:mm"）
   const d = new Date(e.entryDate.replace(' ', 'T'))
@@ -420,6 +426,7 @@ onMounted(async () => {
       if (cash && !accountId.value && !editingId.value) accountId.value = cash.id
     }),
     api.get<Member[]>('members').then((m) => { members.value = m }).catch(() => { /* 成员接口容错 */ }),
+    api.get<PlatformItem[]>('platforms').then((p) => { platforms.value = p }).catch(() => { /* 平台接口容错 */ }),
   ]
   if (editingId.value) {
     tasks.push(loadEdit())
@@ -504,6 +511,9 @@ onMounted(async () => {
       </button>
       <button v-if="existing.length + images.length < 3" class="chip" @click="pickImages">
         <Camera :size="14" /> {{ existing.length + images.length ? `凭证（${existing.length + images.length}/3）` : '拍照' }}
+      </button>
+      <button class="chip" :class="{ active: !!platform }" @click="showPlatform = true">
+        <ShoppingBag :size="14" /> {{ platform || '消费平台' }}
       </button>
     </div>
 
@@ -627,6 +637,27 @@ onMounted(async () => {
           @click="memberId = m.id; showMember = false"
         >
           <span class="acc-name">{{ m.name }}</span>
+        </button>
+      </div>
+    </van-popup>
+
+    <!-- 消费平台弹出层 -->
+    <van-popup v-model:show="showPlatform" position="bottom" round class="acc-pop">
+      <div class="pop-head">
+        <span class="pop-title">选择消费平台</span>
+        <button class="pop-close" @click="showPlatform = false"><X :size="18" /></button>
+      </div>
+      <div class="acc-groups">
+        <button class="acc-item" :class="{ sel: platform === '' }" @click="platform = ''; showPlatform = false">
+          <span class="acc-name">不选</span>
+          <span class="muted">留空</span>
+        </button>
+        <button
+          v-for="p in platforms" :key="p.id"
+          class="acc-item" :class="{ sel: platform === p.name }"
+          @click="platform = p.name; showPlatform = false"
+        >
+          <span class="acc-name">{{ p.name }}</span>
         </button>
       </div>
     </van-popup>

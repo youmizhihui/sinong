@@ -195,6 +195,13 @@ CREATE TABLE IF NOT EXISTS app_user (
   name       TEXT,
   last_seen  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS platform (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  sort       INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
 `;
 
 /**
@@ -230,6 +237,18 @@ function migrate() {
   }
   if (!lgCols.some((c) => c.name === 'owner_uid')) {
     db.exec('ALTER TABLE ledger ADD COLUMN owner_uid TEXT');
+  }
+  const enCols = db.prepare('PRAGMA table_info(entry)').all();
+  if (!enCols.some((c) => c.name === 'platform')) {
+    db.exec('ALTER TABLE entry ADD COLUMN platform TEXT');
+  }
+  // 默认消费平台种子（表空时才插入，用户自定义后不再覆盖）
+  const pfCount = db.prepare('SELECT COUNT(*) AS n FROM platform').get().n;
+  if (pfCount === 0) {
+    const now = new Date().toISOString();
+    const DEFAULT_PLATFORMS = ['京东', '淘宝', '天猫', '拼多多', '抖音商城', '美团', '饿了么', '唯品会', '闲鱼', '亚马逊', '盒马', '山姆会员店', '线下门店'];
+    const ins = db.prepare('INSERT INTO platform (id,name,sort,created_at) VALUES (?,?,?,?)');
+    DEFAULT_PLATFORMS.forEach((name, i) => ins.run(genId('pf'), name, i, now));
   }
   // 回填系统默认二级分类的 icon（老数据 icon 为 null）
   const iconMap = {};

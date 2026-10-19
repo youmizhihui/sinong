@@ -132,6 +132,7 @@ function subLabel(e: Entry) {
   } else if (e.accountName) {
     parts.push(e.accountName)
   }
+  if (e.platform) parts.push(e.platform)
   return parts.join(' · ')
 }
 onMounted(load)

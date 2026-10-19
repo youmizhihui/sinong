@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: 'SettingsView' })
-import { Settings as SettingsIcon, Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit } from 'lucide-vue-next'
+import { Settings as SettingsIcon, Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ref } from 'vue'
 import { api, type ImportPreview, type AiConfig } from '../api'
@@ -209,6 +209,14 @@ async function confirmImport() {
         <div class="row-main">
           <div class="row-title">分类管理</div>
           <div class="muted">自定义分类、设置常用</div>
+        </div>
+        <span class="muted">›</span>
+      </div>
+      <div class="row" style="cursor: pointer; border-top: 1px solid var(--border);" @click="router.push('/platforms')">
+        <span class="icon-badge"><ShoppingBag :size="18" /></span>
+        <div class="row-main">
+          <div class="row-title">消费平台</div>
+          <div class="muted">管理记一笔可选的平台（京东、淘宝等）</div>
         </div>
         <span class="muted">›</span>
       </div>

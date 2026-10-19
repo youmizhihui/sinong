@@ -111,6 +111,7 @@ export interface Entry {
   counterparty?: string
   recordedBy?: string
   memberId?: string | null
+  platform?: string | null
   reimbursable: boolean
   reimburseTarget?: string | null
   reimburseStatus?: string | null
@@ -161,6 +162,15 @@ export interface Member {
   name: string
   relation?: string
   fnos_uid?: string | null
+  isMe?: boolean
+}
+
+/** 消费平台（设置页可自定义增删改） */
+export interface PlatformItem {
+  id: string
+  name: string
+  sort?: number
+  createdAt: string
 }
 
 export interface Settings {

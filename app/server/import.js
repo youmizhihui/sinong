@@ -21,6 +21,7 @@ const FIELD_ALIASES = {
   memberAmount: ['成员金额', '分摊', '成员'],
   member: ['参与人', '消费人', '操作人'],
   merchant: ['商家', '商户', '付款方'],
+  platform: ['消费平台', '平台', '购物平台', '购买渠道'],
   tag: ['标签'],
   loanType: ['借贷类型'],
 };
@@ -148,6 +149,7 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
     const accountTo = cleanAccountName(fm.accountTo !== undefined ? String(row[fm.accountTo] ?? '').trim() : '');
     const memberName = parseMember(fm.member !== undefined ? String(row[fm.member] ?? '').trim() : '');
     const reimburse = fm.reimburse !== undefined ? String(row[fm.reimburse] ?? '').trim() : '';
+    const platformRaw = fm.platform !== undefined ? String(row[fm.platform] ?? '').trim() : '';
 
     if (rowType === 'expense' || rowType === '支出' || rowType === '消费') {
       let categoryId = null;
@@ -174,6 +176,7 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
         accountId, accountName: accountRaw || '现金',
         memberId, memberName: memberName || '',
         reimbursable: reimburse === '可报销' || reimburse === '待报销' || reimburse === '是',
+        platform: platformRaw || null,
         note, rowNum: i + 1,
       });
     } else if (rowType === 'income' || rowType === '收入') {
@@ -193,6 +196,7 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
         entryDate, amount, categoryId, categoryName: parent || '其他收入',
         accountId, accountName: accountRaw || '现金',
         memberId, memberName: memberName || '',
+        platform: platformRaw || null,
         note, rowNum: i + 1,
       });
     } else if (rowType === 'transfer' || rowType === '转账') {
@@ -215,6 +219,7 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
       result.transfer.push({
         entryDate, amount, fromAccountId: fromId, fromAccountName: from || '',
         toAccountId: toId, toAccountName: to || '',
+        platform: platformRaw || null,
         note, rowNum: i + 1,
       });
     } else if (rowType === 'loan' || rowType === '借贷' || rowType === 'repay' || rowType === '收款还款' || rowType === '借入借出') {
@@ -232,6 +237,7 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
         fromAccountName: isOutflow ? (accountRaw || '现金') : LOAN_ACC,
         toAccountId: isOutflow ? null : accountId,
         toAccountName: isOutflow ? LOAN_ACC : (accountRaw || '现金'),
+        platform: platformRaw || null,
         note: `[${categoryFull || '借贷'}] ${note}`.trim(),
         rowNum: i + 1,
       });
@@ -259,6 +265,7 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
     const memberRaw = getVal(row, headerMap, 'memberAmount') || getVal(row, headerMap, 'member') || '';
     const memberName = parseMember(memberRaw);
     const note = getVal(row, headerMap, 'note') || '';
+    const platformRaw = getVal(row, headerMap, 'platform') || '';
 
     if (flowType === '支出' || flowType === 'expense') {
       let categoryId = null;
@@ -284,7 +291,7 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
         entryDate, amount, categoryId, categoryName: child || parent || '其他', categoryParent: parent || null,
         accountId, accountName: accountRaw || '现金',
         memberId, memberName: memberName || '',
-        reimbursable: false, note, rowNum: i + 1,
+        reimbursable: false, platform: platformRaw || null, note, rowNum: i + 1,
       });
     } else if (flowType === '收入' || flowType === 'income') {
       let categoryId = parent ? catIdx.parentIndex[parent] || null : null;
@@ -303,7 +310,7 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
         entryDate, amount, categoryId, categoryName: parent || '其他收入',
         accountId, accountName: accountRaw || '现金',
         memberId, memberName: memberName || '',
-        note, rowNum: i + 1,
+        platform: platformRaw || null, note, rowNum: i + 1,
       });
     } else if (flowType === '转账' || flowType === 'transfer') {
       const { from, to } = parseTransferAccounts(accountRaw);
@@ -319,7 +326,7 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
       result.transfer.push({
         entryDate, amount, fromAccountId: fromId, fromAccountName: from || '',
         toAccountId: toId, toAccountName: to || '',
-        note, rowNum: i + 1,
+        platform: platformRaw || null, note, rowNum: i + 1,
       });
     } else if (flowType === '借贷' || flowType === 'loan') {
       // 借出/还款：普通账户 → 借入借出；借入/收款：借入借出 → 普通账户
@@ -338,6 +345,7 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
         fromAccountName: isOutflow ? (accName || '现金') : LOAN_ACC,
         toAccountId: isOutflow ? null : accountId,
         toAccountName: isOutflow ? LOAN_ACC : (accName || '现金'),
+        platform: platformRaw || null,
         note: `[${categoryFull || '借贷'}] ${note}`.trim(),
         rowNum: i + 1,
       });
@@ -519,6 +527,7 @@ function parseWorkbook(buffer, aiMapping) {
         const accName = getVal(row, headerMap, 'account');
         const reimburse = getVal(row, headerMap, 'reimburse');
         const memberName = parseMember(getVal(row, headerMap, 'memberAmount'));
+        const platformRaw = getVal(row, headerMap, 'platform') || '';
 
         let categoryId = null;
         if (parent && child) {
@@ -547,6 +556,7 @@ function parseWorkbook(buffer, aiMapping) {
           accountId, accountName: accName || '现金',
           memberId, memberName: memberName || '',
           reimbursable: reimburse === '可报销' || reimburse === '待报销',
+          platform: platformRaw || null,
           note, rowNum: i + 1,
         });
       } else if (type === 'income') {
@@ -554,6 +564,7 @@ function parseWorkbook(buffer, aiMapping) {
         const amount = parseAmount(getVal(row, headerMap, 'amount'));
         const accName = getVal(row, headerMap, 'account');
         const memberName = parseMember(getVal(row, headerMap, 'memberAmount'));
+        const platformRaw = getVal(row, headerMap, 'platform') || '';
 
         let categoryId = parent ? catIdx.parentIndex[parent] || null : null;
         if (parent && !categoryId) result.newCategories.set(parent, 'income');
@@ -574,12 +585,14 @@ function parseWorkbook(buffer, aiMapping) {
           entryDate, amount, categoryId, categoryName: parent || '其他收入',
           accountId, accountName: accName || '现金',
           memberId, memberName: memberName || '',
+          platform: platformRaw || null,
           note, rowNum: i + 1,
         });
       } else if (type === 'transfer') {
         const fromName = getVal(row, headerMap, 'accountFrom') || getVal(row, headerMap, 'account');
         const toName = getVal(row, headerMap, 'accountTo');
         const amount = parseAmount(getVal(row, headerMap, 'amount'));
+        const platformRaw = getVal(row, headerMap, 'platform') || '';
 
         let fromId = null, toId = null;
         if (fromName) {
@@ -594,6 +607,7 @@ function parseWorkbook(buffer, aiMapping) {
         result.transfer.push({
           entryDate, amount, fromAccountId: fromId, fromAccountName: fromName || '',
           toAccountId: toId, toAccountName: toName || '',
+          platform: platformRaw || null,
           note, rowNum: i + 1,
         });
       } else if (type === 'loan' || type === 'repay') {
@@ -601,6 +615,7 @@ function parseWorkbook(buffer, aiMapping) {
         const loanType = getVal(row, headerMap, 'loanType') || '';
         const accName = getVal(row, headerMap, 'account');
         const amount = parseAmount(getVal(row, headerMap, 'amount'));
+        const platformRaw = getVal(row, headerMap, 'platform') || '';
         const LOAN_ACC = '借入借出';
 
         let accountId = null;
@@ -619,6 +634,7 @@ function parseWorkbook(buffer, aiMapping) {
           fromAccountName: isOutflow ? (accName || '现金') : LOAN_ACC,
           toAccountId: isOutflow ? null : accountId,
           toAccountName: isOutflow ? LOAN_ACC : (accName || '现金'),
+          platform: platformRaw || null,
           note: `[${loanType || '借贷'}] ${note}`.trim(),
           rowNum: i + 1,
         });
@@ -729,8 +745,8 @@ function doImport(parsed, ledgerId, userUid) {
 
   // 写入支出
   const insertEntry = db.prepare(`INSERT INTO entry
-    (id,ledger_id,flow_type,amount,category_id,account_id,member_id,entry_date,note,reimbursable,recorded_by,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    (id,ledger_id,flow_type,amount,category_id,account_id,member_id,platform,entry_date,note,reimbursable,recorded_by,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
   for (const e of p.expense) {
     const accountId = e.accountId || accIdx[e.accountName];
@@ -742,7 +758,7 @@ function doImport(parsed, ledgerId, userUid) {
     if (!categoryId && e.categoryName) categoryId = catIdx.parentIndex[e.categoryName] || null;
     const memberId = e.memberId || (e.memberName && memIdx[e.memberName]) || null;
     insertEntry.run(genId('ent'), ledgerId, 'expense', e.amount, categoryId, accountId, memberId,
-      e.entryDate, e.note, e.reimbursable ? 1 : 0, userUid, now, now);
+      e.platform || null, e.entryDate, e.note, e.reimbursable ? 1 : 0, userUid, now, now);
     created++;
   }
 
@@ -753,21 +769,21 @@ function doImport(parsed, ledgerId, userUid) {
     const categoryId = e.categoryId || (e.categoryName && catIdx.parentIndex[e.categoryName]) || null;
     const memberId = e.memberId || (e.memberName && memIdx[e.memberName]) || null;
     insertEntry.run(genId('ent'), ledgerId, 'income', e.amount, categoryId, accountId, memberId,
-      e.entryDate, e.note, 0, userUid, now, now);
+      e.platform || null, e.entryDate, e.note, 0, userUid, now, now);
     created++;
   }
 
   // 写入转账
   const insertTransfer = db.prepare(`INSERT INTO entry
-    (id,ledger_id,flow_type,amount,account_id,to_account_id,entry_date,note,recorded_by,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    (id,ledger_id,flow_type,amount,account_id,to_account_id,platform,entry_date,note,recorded_by,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
 
   for (const t of p.transfer) {
     const fromId = t.fromAccountId || accIdx[t.fromAccountName];
     const toId = t.toAccountId || accIdx[t.toAccountName];
     if (!fromId || !toId || fromId === toId) continue;
     insertTransfer.run(genId('ent'), ledgerId, 'transfer', t.amount, fromId, toId,
-      t.entryDate, t.note, userUid, now, now);
+      t.platform || null, t.entryDate, t.note, userUid, now, now);
     created++;
   }
 

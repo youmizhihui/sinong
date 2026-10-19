@@ -220,7 +220,7 @@ async function toggleMember(u: FnosUser) {
         <button class="pop-close" @click="showMenu = false"><MoreHorizontal :size="18" /></button>
       </div>
       <div class="menu-body">
-        <button class="menu-item" @click="editLedger">重命名</button>
+        <button class="menu-item" @click="editLedger">编辑账本</button>
         <button v-if="menuTarget?.type !== 'private'" class="menu-item" @click="openMembers(menuTarget!)">成员管理</button>
         <button class="menu-item danger" @click="removeLedger">删除账本</button>
       </div>

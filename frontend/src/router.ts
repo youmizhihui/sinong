@@ -10,6 +10,7 @@ const routes = [
   { path: '/detail/:id', name: 'detail', component: () => import('./views/DetailView.vue'), meta: { tab: false } },
   { path: '/members', name: 'members', component: () => import('./views/MembersView.vue'), meta: { tab: false } },
   { path: '/categories', name: 'categories', component: () => import('./views/CategoriesView.vue'), meta: { tab: false } },
+  { path: '/platforms', name: 'platforms', component: () => import('./views/PlatformView.vue'), meta: { tab: false } },
   { path: '/ledgers', name: 'ledgers', component: () => import('./views/LedgersView.vue'), meta: { tab: false } },
   { path: '/periodics', name: 'periodics', component: () => import('./views/PeriodicsView.vue'), meta: { tab: false } },
   { path: '/calendar', name: 'calendar', component: () => import('./views/CalendarView.vue'), meta: { tab: false } },
