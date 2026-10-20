@@ -379,7 +379,8 @@ function getVal(row, map, field) {
 function parseAmount(v) {
   if (v === null || v === undefined || v === '') return 0;
   const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
-  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+  // 系统约定 amount 恒为正整数（分），收支方向由 flow_type 决定；负数统一取绝对值
+  return Number.isFinite(n) ? Math.abs(Math.round(n * 100)) : 0;
 }
 
 /** 解析日期为 YYYY-MM-DD HH:mm:ss */

@@ -50,7 +50,7 @@ function newEntry() {
       </button>
     </nav>
 
-    <div class="side-foot muted">司农记账 v1.0.0 · 数据仅存于本机</div>
+    <div class="side-foot muted">司农记账 v1.0.1 · 数据仅存于本机</div>
   </aside>
 </template>
 

@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { showConfirmDialog, showToast } from 'vant'
 import { api, type FnosUser } from '../api'
 import { store } from '../store'
-import { ArrowLeft, Plus, MoreHorizontal, Check, BookOpen, Luggage, Briefcase, Layers, Users, Lock } from 'lucide-vue-next'
+import { ArrowLeft, Plus, MoreHorizontal, Check, BookOpen, Luggage, Briefcase, Layers, Users, Lock, X } from 'lucide-vue-next'
 
 const router = useRouter()
 
@@ -217,7 +217,7 @@ async function toggleMember(u: FnosUser) {
     <van-popup v-model:show="showMenu" position="bottom" round>
       <div class="menu-head">
         <span class="pop-title">{{ menuTarget?.name }}</span>
-        <button class="pop-close" @click="showMenu = false"><MoreHorizontal :size="18" /></button>
+        <button class="pop-close" @click="showMenu = false"><X :size="18" /></button>
       </div>
       <div class="menu-body">
         <button class="menu-item" @click="editLedger">编辑账本</button>
@@ -230,7 +230,7 @@ async function toggleMember(u: FnosUser) {
     <van-popup v-model:show="showAdd" position="bottom" round>
       <div class="pop-head">
         <span class="pop-title">新建账本</span>
-        <button class="pop-close" @click="showAdd = false"><Plus :size="18" /></button>
+        <button class="pop-close" @click="showAdd = false"><X :size="18" /></button>
       </div>
       <div class="form-body">
         <div class="rel-label muted">账本类型</div>
@@ -261,7 +261,7 @@ async function toggleMember(u: FnosUser) {
     <van-popup v-model:show="showEdit" position="bottom" round>
       <div class="pop-head">
         <span class="pop-title">编辑账本</span>
-        <button class="pop-close" @click="showEdit = false"><Plus :size="18" /></button>
+        <button class="pop-close" @click="showEdit = false"><X :size="18" /></button>
       </div>
       <div class="form-body">
         <input v-model="editName" class="name-input" maxlength="12" placeholder="账本名称" />
@@ -282,7 +282,7 @@ async function toggleMember(u: FnosUser) {
     <van-popup v-model:show="showMembers" position="bottom" round>
       <div class="pop-head">
         <span class="pop-title">成员管理 · {{ memberTarget?.name }}</span>
-        <button class="pop-close" @click="showMembers = false"><Plus :size="18" /></button>
+        <button class="pop-close" @click="showMembers = false"><X :size="18" /></button>
       </div>
       <div class="form-body">
         <div class="rel-label muted">勾选可访问此账本的飞牛用户（家人需先打开过一次司农记账才会出现在列表）</div>

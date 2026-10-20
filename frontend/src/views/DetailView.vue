@@ -68,7 +68,7 @@ const amountText = computed(() => {
   const e = entry.value
   if (!e) return ''
   const sign = e.flowType === 'income' ? '+' : e.flowType === 'transfer' ? '' : '-'
-  return `${sign}${fmtMoney(e.amount)}`
+  return `${sign}${fmtMoney(Math.abs(e.amount))}`
 })
 const catName = computed(() => {
   const e = entry.value

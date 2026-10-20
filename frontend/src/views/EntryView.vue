@@ -243,7 +243,7 @@ function pickImages() {
 function onFiles(e: Event) {
   const files = (e.target as HTMLInputElement).files
   if (!files) return
-  const max = 3 - existing.value.length
+  const max = 9 - existing.value.length
   for (const f of Array.from(files)) {
     if (images.value.length >= max) break
     images.value.push({ url: URL.createObjectURL(f), name: f.name })
@@ -496,21 +496,21 @@ onMounted(async () => {
       <button v-if="flowType !== 'transfer'" class="chip acc-chip" :class="{ active: !!accountId }" @click="openAccPicker('from')">
         <Wallet :size="14" /> {{ fromAccName || '选择账户' }}
       </button>
-      <button v-if="existing.length + images.length < 3" class="chip" @click="pickImages">
-        <Camera :size="14" /> {{ existing.length + images.length ? `凭证（${existing.length + images.length}/3）` : '拍照' }}
-      </button>
-      <button class="chip" :class="{ active: !!platform }" @click="showPlatform = true">
-        <ShoppingBag :size="14" /> {{ platform || '消费平台' }}
+      <button v-if="existing.length + images.length < 9" class="chip" @click="pickImages">
+        <Camera :size="14" /> {{ existing.length + images.length ? `凭证（${existing.length + images.length}/9）` : '拍照' }}
       </button>
     </div>
 
-    <!-- 可报销 + 成员 -->
+    <!-- 可报销 + 消费平台 + 成员 -->
     <div class="info-row">
       <button
         v-if="flowType === 'expense'"
         class="chip" :class="{ active: reimbursable }"
         @click="reimbursable = !reimbursable"
       ><BadgeCheck :size="14" /> {{ reimbursable ? '可报销' : '可报销' }}</button>
+      <button class="chip" :class="{ active: !!platform }" @click="showPlatform = true">
+        <ShoppingBag :size="14" /> {{ platform || '消费平台' }}
+      </button>
       <button class="chip" :class="{ active: !!memberId }" @click="showMember = true">
         <User :size="14" /> {{ memberName }}
       </button>

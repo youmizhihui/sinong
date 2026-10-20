@@ -140,7 +140,7 @@ onDeactivated(() => {
           type="search"
           enterkeyhint="search"
           class="sbox-input"
-          placeholder="搜索备注、分类、成员"
+          placeholder="搜索备注、分类、成员、账户"
           @keydown.enter="search"
         />
       </div>
@@ -200,7 +200,7 @@ onDeactivated(() => {
               <div class="muted">{{ subLabel(e) }}</div>
             </div>
             <span class="num" :class="e.flowType === 'income' ? 'money-income' : 'money-expense'">
-              {{ e.flowType === 'expense' || e.flowType === 'transfer' ? '-' : '' }}{{ fmtMoney(e.amount) }}
+              {{ e.flowType === 'expense' || e.flowType === 'transfer' ? '-' : '' }}{{ fmtMoney(Math.abs(e.amount)) }}
             </span>
           </div>
         </div>

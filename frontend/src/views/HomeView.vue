@@ -309,7 +309,7 @@ onDeactivated(() => {
               <div class="muted">{{ subLabel(e) }}</div>
             </div>
             <span class="num" :class="e.flowType === 'income' ? 'money-income' : 'money-expense'">
-              {{ e.flowType === 'expense' || e.flowType === 'transfer' ? '-' : '' }}{{ fmtMoney(e.amount) }}
+              {{ e.flowType === 'expense' || e.flowType === 'transfer' ? '-' : '' }}{{ fmtMoney(Math.abs(e.amount)) }}
             </span>
           </div>
         </div>

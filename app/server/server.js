@@ -1174,10 +1174,10 @@ function createRouter(user) {
       if (categoryId) { where.push('category_id=?'); vals.push(categoryId); }
       if (memberId) { where.push('member_id=?'); vals.push(memberId); }
       if (keyword) {
-        // 备注包含关键词，或分类（子分类/父分类）名称包含关键词，或成员名称包含关键词
+        // 备注包含关键词，或分类（子分类/父分类）名称包含关键词，或成员名称包含关键词，或账户名包含关键词
         // （member_id 为空的记录视为"自己"，命中"自己"时一并纳入）
-        where.push('(note LIKE ? OR category_id IN (SELECT id FROM category WHERE name LIKE ? OR parent_id IN (SELECT id FROM category WHERE name LIKE ?)) OR member_id IN (SELECT id FROM member WHERE name LIKE ?) OR (member_id IS NULL AND (SELECT COUNT(*) FROM member WHERE name LIKE ?) > 0))');
-        vals.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+        where.push('(note LIKE ? OR category_id IN (SELECT id FROM category WHERE name LIKE ? OR parent_id IN (SELECT id FROM category WHERE name LIKE ?)) OR member_id IN (SELECT id FROM member WHERE name LIKE ?) OR (member_id IS NULL AND (SELECT COUNT(*) FROM member WHERE name LIKE ?) > 0) OR account_id IN (SELECT id FROM account WHERE name LIKE ?) OR to_account_id IN (SELECT id FROM account WHERE name LIKE ?))');
+        vals.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
       }
       const rows = db.prepare(`SELECT * FROM entry WHERE ${where.join(' AND ')} ORDER BY entry_date DESC, created_at DESC LIMIT ? OFFSET ?`).all(...vals, limit, offset);
       const total = db.prepare(`SELECT COUNT(*) AS n FROM entry WHERE ${where.join(' AND ')}`).get(...vals).n;
@@ -1498,6 +1498,7 @@ function start() {
     try { fs.unlinkSync(SOCKET_PATH); } catch (e) { /* 陈旧 socket */ }
     server.listen(SOCKET_PATH, () => {
       console.log(`[sinong] listening on unix socket ${SOCKET_PATH}`);
+      startPeriodicScheduler();
     });
   } else {
     const port = PORT || 18099;
@@ -1505,8 +1506,23 @@ function start() {
     server.listen(port, '0.0.0.0', () => {
       console.log(`[sinong] listening on http://0.0.0.0:${port}`);
       console.log(`[sinong] data dir: ${DATA_DIR || '(memory)'}`);
+      startPeriodicScheduler();
     });
   }
+}
+
+/** 周期账自动补生成：启动时立即跑一次，之后每小时检查一次（幂等） */
+function startPeriodicScheduler() {
+  try {
+    const n = syncPeriodic(db);
+    if (n > 0) console.log(`[sinong] periodic auto-posted ${n} entry(ies)`);
+  } catch (e) { console.error('[sinong] periodic sync failed:', e.message); }
+  setInterval(() => {
+    try {
+      const n = syncPeriodic(db);
+      if (n > 0) console.log(`[sinong] periodic auto-posted ${n} entry(ies)`);
+    } catch (e) { console.error('[sinong] periodic sync failed:', e.message); }
+  }, 60 * 60 * 1000);
 }
 
 start();

@@ -242,6 +242,8 @@ function migrate() {
   if (!enCols.some((c) => c.name === 'platform')) {
     db.exec('ALTER TABLE entry ADD COLUMN platform TEXT');
   }
+  // 历史导入残留的负金额修正：系统约定 amount 恒为正，方向由 flow_type 决定
+  db.exec('UPDATE entry SET amount = ABS(amount) WHERE amount < 0');
   // 默认消费平台种子（表空时才插入，用户自定义后不再覆盖）
   const pfCount = db.prepare('SELECT COUNT(*) AS n FROM platform').get().n;
   if (pfCount === 0) {
