@@ -1,11 +1,11 @@
 <script setup lang="ts">
 defineOptions({ name: 'SettingsView' })
-import { Settings as SettingsIcon, Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag } from 'lucide-vue-next'
+import { Settings as SettingsIcon, Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag, Plug, Copy, RefreshCw } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ref } from 'vue'
 import { api, type ImportPreview, type AiConfig } from '../api'
 import { store } from '../store'
-import { showToast, showConfirmDialog } from 'vant'
+import { showToast, showConfirmDialog, Switch as VanSwitch } from 'vant'
 
 const router = useRouter()
 const saving = ref(false)
@@ -42,6 +42,101 @@ function pickAiService() {
 
 const aiTesting = ref(false)
 const aiTestResult = ref<{ ok: boolean; msg: string } | null>(null)
+
+// ---- MCP 接入配置 ----
+const showMcp = ref(false)
+const mcpInfo = ref<{ token: string; port: number; masked: string; enabled: boolean; status: string } | null>(null)
+const mcpResetting = ref(false)
+const mcpPortInput = ref('')
+const mcpEnabled = ref(false)
+const mcpSaving = ref(false)
+const mcpChecking = ref(false)
+const mcpPortMsg = ref('')
+const mcpPortOk = ref(false)
+async function loadMcp() {
+  try {
+    mcpInfo.value = await api.get<{ token: string; port: number; masked: string; enabled: boolean; status: string }>('mcp')
+    mcpPortInput.value = String(mcpInfo.value.port)
+    mcpEnabled.value = mcpInfo.value.enabled
+  } catch { /* 静默 */ }
+}
+async function saveMcpPort() {
+  const newPort = parseInt(mcpPortInput.value, 10)
+  const oldPort = mcpInfo.value?.port
+  if (newPort === oldPort) {
+    mcpPortMsg.value = ''
+    return
+  }
+  mcpChecking.value = true
+  mcpPortMsg.value = ''
+  try {
+    const r = await api.post<{ available: boolean; message: string }>('mcp/check-port', { port: newPort })
+    mcpChecking.value = false
+    if (!r.available) {
+      mcpPortOk.value = false
+      mcpPortMsg.value = ''
+      showToast('端口被其他应用占用，请更换端口')
+      return
+    }
+    await api.put('mcp/config', { port: newPort })
+    mcpPortOk.value = true
+    mcpPortMsg.value = ''
+    showToast('端口可用，请在飞牛应用中心重启司农记账生效')
+  } catch (e: any) {
+    mcpChecking.value = false
+    mcpPortOk.value = false
+    showToast((e as Error).message)
+  }
+}
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    showToast('已复制')
+  } catch {
+    // HTTP 环境降级：用临时 textarea
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      showToast('已复制')
+    } catch {
+      showToast('复制失败，请手动复制')
+    }
+  }
+}
+async function copyMcpConfig() {
+  const port = mcpInfo.value?.port || 38898
+  const token = mcpInfo.value?.token || ''
+  const cfg = JSON.stringify({ mcpServers: { sinong: { url: `http://127.0.0.1:${port}/mcp`, headers: { Authorization: `Bearer ${token}` } } } }, null, 2)
+  await copyText(cfg)
+}
+async function onToggleMcp(val: boolean) {
+  try {
+    await api.put('mcp/config', { enabled: val })
+    showToast(val ? '已开启，请在飞牛应用中心重启司农记账生效' : '已关闭，请在飞牛应用中心重启司农记账生效')
+  } catch (e: any) {
+    showToast((e as Error).message)
+  }
+}
+async function resetMcp() {
+  try {
+    await showConfirmDialog({ title: '重置 MCP Token', message: '重置后旧 Token 将立即失效，需要在 AI 客户端重新配置。', confirmButtonText: '重置' })
+  } catch { return }
+  mcpResetting.value = true
+  try {
+    mcpInfo.value = await api.post<{ token: string; port: number; masked: string; enabled: boolean; status: string }>('mcp/reset', {})
+    showToast('MCP Token 已重置')
+  } catch (err) {
+    showToast((err as Error).message)
+  } finally {
+    mcpResetting.value = false
+  }
+}
 async function testAi() {
   if (!aiForm.value.url.trim() || !aiForm.value.model.trim()) {
     showToast('请先填写 API 地址与模型名称')
@@ -262,6 +357,14 @@ async function confirmImport() {
         </div>
         <span class="muted">›</span>
       </div>
+      <div class="row" style="cursor: pointer; border-top: 1px solid var(--border);" @click="showMcp = true; loadMcp()">
+        <span class="icon-badge"><Plug :size="18" /></span>
+        <div class="row-main">
+          <div class="row-title">MCP 接入</div>
+          <div class="muted">让 AI 助手（ClawBot 等）远程记账</div>
+        </div>
+        <span class="muted">›</span>
+      </div>
     </div>
     <input ref="fileInput" type="file" accept=".xlsx,.xls,.csv" style="display: none" @change="onFile" />
 
@@ -331,6 +434,71 @@ async function confirmImport() {
         </div>
       </div>
     </van-popup>
+
+    <!-- MCP 接入弹层 -->
+    <van-popup v-model:show="showMcp" position="center" round>
+      <div class="ai-pop">
+        <div class="pop-head">
+          <span class="pop-title">MCP 接入</span>
+          <button class="pop-close" @click="showMcp = false"><span style="font-size:20px;">×</span></button>
+        </div>
+        <div class="form-body">
+          <div class="ai-field">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <label style="margin:0;">启用 MCP Server</label>
+              <van-switch v-model="mcpEnabled" size="22px" @change="onToggleMcp" />
+            </div>
+            <div v-if="mcpInfo?.status && mcpInfo.status !== 'running' && mcpEnabled" class="ai-tip" style="color: var(--expense); margin-top:4px;">
+              ⚠ MCP 服务未运行：{{ mcpInfo.status }}
+            </div>
+            <div v-else-if="mcpInfo?.status === 'running'" class="ai-tip" style="color: #52c41a; margin-top:4px;">
+              ● MCP 服务运行中
+            </div>
+          </div>
+          <div class="ai-field">
+            <label>MCP 端口</label>
+            <div class="port-row">
+              <input v-model="mcpPortInput" type="number" min="1024" max="65535" style="flex:1;" />
+              <van-button size="small" type="primary" :loading="mcpSaving" @click="saveMcpPort">保存</van-button>
+            </div>
+            <div v-if="mcpPortMsg" class="ai-tip" :style="{marginTop:'6px', color: mcpPortOk ? '#52c41a' : 'var(--expense)'}">{{ mcpPortMsg }}</div>
+            <div class="ai-tip" style="margin-top:4px;">⚠ 请勿将此端口暴露到公网，仅在局域网内使用。</div>
+          </div>
+          <div class="ai-field">
+            <label>接入地址</label>
+            <div style="display:flex;align-items:center;gap:4px;">
+              <input :value="`http://127.0.0.1:${mcpInfo?.port || 38898}/mcp`" readonly style="flex:1;" />
+              <button class="copy-btn" title="复制" @click="copyText(`http://127.0.0.1:${mcpInfo?.port || 38898}/mcp`)"><Copy :size="16" /></button>
+            </div>
+          </div>
+          <div class="ai-field">
+            <label>访问 Token</label>
+            <div style="display:flex;align-items:center;gap:4px;">
+              <input :value="mcpInfo?.token || ''" readonly style="flex:1;" />
+              <button class="copy-btn" title="复制" @click="copyText(mcpInfo?.token || '')"><Copy :size="16" /></button>
+              <button class="copy-btn" title="重置" @click="resetMcp"><RefreshCw :size="16" /></button>
+            </div>
+          </div>
+          <div class="ai-tip">在 AI 客户端（ClawBot/OpenClaw 等）中配置上述地址和 Token，即可通过对话自动记账。不配置不影响正常手动记账。</div>
+          <div class="ai-field">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+              <label style="margin:0;">配置示例（JSON）</label>
+              <button class="copy-btn" style="padding:2px 6px;font-size:12px;" title="复制" @click="copyMcpConfig"><Copy :size="12" /> 复制</button>
+            </div>
+            <pre class="mcp-example">{
+  "mcpServers": {
+    "sinong": {
+      "url": "http://127.0.0.1:{{ mcpInfo?.port || 38898 }}/mcp",
+      "headers": {
+        "Authorization": "Bearer {{ mcpInfo?.token || '你的token' }}"
+      }
+    }
+  }
+}</pre>
+          </div>
+        </div>
+      </div>
+    </van-popup>
   </div>
 </template>
 
@@ -394,4 +562,17 @@ async function confirmImport() {
 .ai-test-result { font-size: 12px; margin-bottom: 12px; line-height: 1.5; word-break: break-all; }
 .ai-test-result.ok { color: #52c41a; }
 .ai-test-result.fail { color: var(--expense); }
+.mcp-example {
+  margin: 0; padding: 10px 12px; border-radius: 8px;
+  background: var(--bg); border: 1px solid var(--border);
+  font-size: 11px; line-height: 1.5; color: var(--text);
+  white-space: pre-wrap; word-break: break-all;
+}
+.copy-btn {
+  background: none; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); cursor: pointer; padding: 6px 8px; display: flex;
+  align-items: center; font-size: 16px; flex-shrink: 0;
+}
+.copy-btn:hover { color: var(--brand); border-color: var(--brand); }
+.port-row { display: flex; gap: 8px; align-items: center; }
 </style>

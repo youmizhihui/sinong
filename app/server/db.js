@@ -202,6 +202,13 @@ CREATE TABLE IF NOT EXISTS platform (
   sort       INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS mcp_token (
+  user_id           TEXT PRIMARY KEY,
+  token             TEXT NOT NULL UNIQUE,
+  default_ledger_id TEXT,
+  created_at        TEXT NOT NULL
+);
 `;
 
 /**

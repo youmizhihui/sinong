@@ -4,7 +4,7 @@ import { ref, computed, onMounted, onActivated, onDeactivated } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, type Entry, type Member, type Ledger } from '../api'
 import { store, loadSettings, fmtMoney } from '../store'
-import { Eye, EyeOff, ReceiptText, BookOpen, ChevronDown, ChevronLeft, ChevronRight, X, ArrowUp, ArrowLeftRight, Search } from 'lucide-vue-next'
+import { Eye, EyeOff, ReceiptText, BookOpen, ChevronDown, ChevronLeft, ChevronRight, X, ArrowUp, ArrowLeftRight, Search, RefreshCw } from 'lucide-vue-next'
 import { iconForCat } from '../catIcons'
 
 const router = useRouter()
@@ -13,6 +13,7 @@ const entries = ref<Entry[]>([])
 const members = ref<Member[]>([])
 const ledgers = ref<Ledger[]>([])
 const loading = ref(true)
+const refreshing = ref(false)
 const showLedger = ref(false)
 const loadingMore = ref(false)
 const hasMore = ref(true)
@@ -201,6 +202,10 @@ onMounted(() => {
   if ('requestIdleCallback' in window) requestIdleCallback(preload)
   else setTimeout(preload, 800)
 })
+async function onRefresh() {
+  refreshing.value = true
+  try { await load() } finally { refreshing.value = false }
+}
 onActivated(() => {
   window.addEventListener('scroll', onWinScroll, { passive: true })
   if (store.homeDirty) {
@@ -228,6 +233,7 @@ onDeactivated(() => {
         @keydown.enter="doSearch"
       />
       <van-button size="small" round type="primary" class="sb-btn" @click="doSearch">搜索</van-button>
+      <van-button size="small" class="sb-btn" :loading="refreshing" @click="onRefresh"><RefreshCw :size="16" /></van-button>
     </div>
     <!-- 本月收支（顶部集成账本切换） -->
     <div class="hero card">

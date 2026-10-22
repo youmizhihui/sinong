@@ -92,6 +92,14 @@ function argVal(name, def) {
   return i >= 0 && args[i + 1] ? args[i + 1] : def;
 }
 const PORT = parseInt(argVal('port', '0'), 10);
+// MCP 端口：默认 38898，用户可在设置中修改（存数据库）
+function getMcpPort() {
+  try {
+    const row = getDb().prepare("SELECT value FROM setting WHERE key='mcp_port'").get();
+    if (row) return parseInt(row.value, 10) || 38898;
+  } catch {}
+  return 38898;
+}
 // 数据目录：优先用 fnOS 共享目录（出现在"应用文件"里），其次 TRIM_PKGVAR/data，本地调试用 --data-dir
 function resolveDataDir() {
   const explicit = argVal('data-dir', null);
@@ -1343,6 +1351,57 @@ function createRouter(user) {
         db2.prepare('INSERT OR REPLACE INTO setting (key,value) VALUES (?,?)').run('hide_amount', body.hideAmount ? '1' : '0');
       return { ok: true };
     },
+    'GET /api/mcp': (_b, _p, req) => {
+      const user = getUser(req);
+      if (!user) throw httpError(401, '未登录');
+      const r = getMcpToken(user.uid);
+      let enabled = false;
+      let status = 'disabled';
+      try {
+        const db = getDb();
+        const row = db.prepare("SELECT value FROM setting WHERE key='mcp_enabled'").get();
+        if (row && row.value === '1') enabled = true;
+        const s = db.prepare("SELECT value FROM setting WHERE key='mcp_status'").get();
+        if (s) status = s.value;
+      } catch {}
+      return { token: r.token, port: getMcpPort(), masked: maskKey(r.token), enabled, status };
+    },
+    'POST /api/mcp/reset': (_b, _p, req) => {
+      const user = getUser(req);
+      if (!user) throw httpError(401, '未登录');
+      const token = resetMcpToken(user.uid);
+      return { token, port: getMcpPort(), masked: maskKey(token) };
+    },
+    'PUT /api/mcp/config': (body, _p, req) => {
+      const user = getUser(req);
+      if (!user) throw httpError(401, '未登录');
+      const db = getDb();
+      if (body.enabled !== undefined) {
+        db.prepare("INSERT OR REPLACE INTO setting (key,value) VALUES ('mcp_enabled',?)").run(body.enabled ? '1' : '0');
+      }
+      if (body.port !== undefined) {
+        const port = parseInt(body.port, 10);
+        if (!port || port < 1024 || port > 65535) throw httpError(400, '端口范围 1024-65535');
+        db.prepare("INSERT OR REPLACE INTO setting (key,value) VALUES ('mcp_port',?)").run(String(port));
+      }
+      return { ok: true, restartRequired: true };
+    },
+    'POST /api/mcp/check-port': (body, _p, req) => {
+      const user = getUser(req);
+      if (!user) throw httpError(401, '未登录');
+      const port = parseInt(body.port, 10);
+      if (!port || port < 1024 || port > 65535) throw httpError(400, '端口范围 1024-65535');
+      return new Promise((resolve) => {
+        const testServer = http.createServer();
+        testServer.once('error', (e) => {
+          if (e.code === 'EADDRINUSE') resolve({ available: false, message: '端口 ' + port + ' 已被占用' });
+          else resolve({ available: false, message: e.message });
+        });
+        testServer.listen(port, '0.0.0.0', () => {
+          testServer.close(() => resolve({ available: true, message: '端口可用' }));
+        });
+      });
+    },
   };
 }
 
@@ -1427,6 +1486,465 @@ function serveStatic(res, urlPath) {
   });
 }
 
+// ==================== MCP Server（AI 客户端远程记账） ====================
+function getMcpToken(userId) {
+  const db = getDb();
+  let r = db.prepare('SELECT token, default_ledger_id FROM mcp_token WHERE user_id=?').get(userId);
+  if (!r) {
+    const token = require('node:crypto').randomBytes(24).toString('hex');
+    db.prepare('INSERT INTO mcp_token (user_id,token,created_at) VALUES (?,?,?)').run(userId, token, nowIso());
+    r = { token, default_ledger_id: null };
+  }
+  return r;
+}
+function resetMcpToken(userId) {
+  const db = getDb();
+  const token = require('node:crypto').randomBytes(24).toString('hex');
+  db.prepare('INSERT OR REPLACE INTO mcp_token (user_id,token,created_at) VALUES (?,?,?)').run(userId, token, nowIso());
+  return token;
+}
+/** token → 解析出 user_id 和默认账本 */
+function resolveMcpToken(token) {
+  return getDb().prepare('SELECT user_id, default_ledger_id FROM mcp_token WHERE token=?').get(token);
+}
+
+/** 按名称模糊匹配分类 ID（先匹配子分类，再匹配父分类） */
+function findCategoryId(ledgerId, name, flowType) {
+  if (!name) return null;
+  const db = getDb();
+  const like = `%${name}%`;
+  const ft = flowType === 'income' ? 'income' : 'expense';
+  let r = db.prepare(`SELECT id FROM category WHERE name LIKE ? AND parent_id IS NOT NULL AND type = ? LIMIT 1`).get(like, ft);
+  if (r) return r.id;
+  r = db.prepare(`SELECT id FROM category WHERE name LIKE ? AND parent_id IS NULL AND type = ? LIMIT 1`).get(like, ft);
+  return r?.id || null;
+}
+/** 按名称模糊匹配消费平台 */
+function findPlatform(name) {
+  if (!name) return null;
+  const db = getDb();
+  const like = `%${name}%`;
+  const r = db.prepare('SELECT name FROM platform WHERE name LIKE ? LIMIT 1').get(like);
+  return r?.name || name;
+}
+/** 按名称模糊匹配账户 ID */
+function findAccountId(ledgerId, name) {
+  if (!name) return null;
+  const db = getDb();
+  const like = `%${name}%`;
+  const r = db.prepare(`SELECT id FROM account WHERE name LIKE ? LIMIT 1`).get(like);
+  return r?.id || null;
+}
+/** 按名称模糊匹配成员 ID */
+function findMemberId(ledgerId, name) {
+  if (!name) return null;
+  const db = getDb();
+  const like = `%${name}%`;
+  const r = db.prepare(`SELECT id FROM member WHERE name LIKE ? LIMIT 1`).get(like);
+  return r?.id || null;
+}
+
+const MCP_TOOLS = [
+  {
+    name: 'add_expense',
+    description: '记一笔支出。amount 单位为元（如 25.5 表示 25.5 元）。category 填支出分类名，account 填账户名，member 填消费成员姓名。注意：分类、账户、成员的名称必须与系统中实际存在的完全匹配，调用前请先调用 list_categories、list_accounts、list_members 获取可用列表。member 不填默认自己。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: '金额（元），正数' },
+        category: { type: 'string', description: '支出分类名，先调 list_categories 查看可用列表' },
+        note: { type: 'string', description: '备注描述' },
+        account: { type: 'string', description: '账户名，先调 list_accounts 查看可用列表' },
+        member: { type: 'string', description: '消费成员姓名，不填默认自己' },
+        date: { type: 'string', description: '日期 YYYY-MM-DD，不填默认今天' },
+        platform: { type: 'string', description: '消费平台，如 淘宝/京东/美团' },
+      },
+      required: ['amount'],
+    },
+  },
+  {
+    name: 'add_income',
+    description: '记一笔收入。amount 单位为元。分类、账户、成员名称必须与系统中实际存在的完全匹配，调用前请先调用 list_categories、list_accounts、list_members 获取可用列表。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: '金额（元），正数' },
+        category: { type: 'string', description: '收入分类名，先调 list_categories 查看可用列表' },
+        note: { type: 'string', description: '备注描述' },
+        account: { type: 'string', description: '收入账户名，先调 list_accounts 查看可用列表' },
+        member: { type: 'string', description: '收入成员姓名，不填默认自己' },
+        date: { type: 'string', description: '日期 YYYY-MM-DD，不填默认今天' },
+      },
+      required: ['amount'],
+    },
+  },
+  {
+    name: 'add_transfer',
+    description: '记一笔转账/账户间划转。账户名必须与系统中实际存在的完全匹配，调用前请先调用 list_accounts 获取可用列表。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: '金额（元），正数' },
+        from_account: { type: 'string', description: '转出账户名，先调 list_accounts 查看' },
+        to_account: { type: 'string', description: '转入账户名，先调 list_accounts 查看' },
+        note: { type: 'string', description: '备注描述' },
+        member: { type: 'string', description: '成员姓名，不填默认自己' },
+        date: { type: 'string', description: '日期 YYYY-MM-DD，不填默认今天' },
+      },
+      required: ['amount', 'from_account', 'to_account'],
+    },
+  },
+  {
+    name: 'list_accounts',
+    description: '列出当前账本所有账户名，供记账时选择。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'create_account',
+    description: '创建一个新账户。name 为账户名（如"招商银行卡""微信钱包"），type 为账户类型（cash 现金 / bank 银行卡 / credit 信用卡 / ewallet 电子钱包），balance 为初始余额（元，默认0）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: '账户名，必填' },
+        type: { type: 'string', description: '账户类型：cash/bank/credit/ewallet，默认 cash' },
+        balance: { type: 'number', description: '初始余额（元），默认0' },
+        note: { type: 'string', description: '备注' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'list_categories',
+    description: '列出当前账本所有支出和收入分类名，供记账时选择。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_members',
+    description: '列出当前账本所有成员姓名。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_platforms',
+    description: '列出所有消费平台名（如淘宝、京东、美团），供记账时选择。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_entries',
+    description: '查询账单记录。可按日期范围筛选，返回最近的收支记录。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        start_date: { type: 'string', description: '开始日期 YYYY-MM-DD，不填默认最近7天' },
+        end_date: { type: 'string', description: '结束日期 YYYY-MM-DD，不填默认今天' },
+        limit: { type: 'number', description: '返回条数，默认20，最多50' },
+      },
+    },
+  },
+  {
+    name: 'monthly_summary',
+    description: '查询月度收支统计。返回指定月份的总支出、总收入和各分类支出。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        month: { type: 'string', description: '月份 YYYY-MM，不填默认本月' },
+      },
+    },
+  },
+  {
+    name: 'create_category',
+    description: '创建新分类。name 为分类名，flow_type 为 expense（支出）或 income（收入），parent_name 为一级分类名（选填，二级分类时填）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: '分类名，必填' },
+        flow_type: { type: 'string', description: 'expense 或 income，默认 expense' },
+        parent_name: { type: 'string', description: '一级分类名，创建二级分类时填' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'delete_entry',
+    description: '删除一条账单记录。需要提供记录ID，可通过 list_entries 查询获取。谨慎操作，不可恢复。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_id: { type: 'string', description: '要删除的记录ID' },
+      },
+      required: ['entry_id'],
+    },
+  },
+  {
+    name: 'update_entry',
+    description: '修改一条账单记录。需要提供记录ID和要修改的字段。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_id: { type: 'string', description: '要修改的记录ID' },
+        amount: { type: 'number', description: '新金额（元）' },
+        note: { type: 'string', description: '新备注' },
+        category: { type: 'string', description: '新分类名' },
+      },
+      required: ['entry_id'],
+    },
+  },
+];
+
+function mcpResult(text) {
+  return { content: [{ type: 'text', text: String(text) }] };
+}
+
+function mcpCallTool(name, args, mcpUser) {
+  const db = getDb();
+  const { userId, defaultLedgerId } = mcpUser;
+  let ledgerId = defaultLedgerId
+    || db.prepare("SELECT value FROM setting WHERE key='current_ledger'").get()?.value;
+  if (!ledgerId) throw new Error('未选择账本');
+  const user = { uid: userId, name: userId };
+  const cents = Math.round(Number(args.amount) * 100);
+
+  if (name === 'add_expense' || name === 'add_income') {
+    const flowType = name === 'add_expense' ? 'expense' : 'income';
+    let accountId = findAccountId(ledgerId, args.account);
+    if (!accountId) {
+      // 没指定或匹配不到账户时，选第一个账户（优先现金）
+      const fallback = db.prepare(`SELECT id FROM account WHERE name LIKE '%现金%' LIMIT 1`).get()
+        || db.prepare(`SELECT id FROM account ORDER BY sort LIMIT 1`).get();
+      accountId = fallback?.id;
+    }
+    const categoryId = findCategoryId(ledgerId, args.category, flowType);
+    const memberId = findMemberId(ledgerId, args.member);
+    const entry = createEntry(user, {
+      ledgerId, accountId, flowType, amount: cents, categoryId,
+      note: args.note || '', memberId,
+      entryDate: args.date ? `${args.date} ${nowLocal().slice(11)}` : nowLocal(),
+      platform: args.platform ? findPlatform(args.platform) : null,
+    });
+    return mcpResult(`已记${flowType === 'expense' ? '支出' : '收入'} ¥${(cents / 100).toFixed(2)}` + (args.category ? `（${args.category}）` : ''));
+  }
+  if (name === 'add_transfer') {
+    const fromId = findAccountId(ledgerId, args.from_account);
+    const toId = findAccountId(ledgerId, args.to_account);
+    if (!fromId || !toId) throw new Error('找不到指定的账户');
+    const memberId = findMemberId(ledgerId, args.member);
+    createEntry(user, {
+      ledgerId, accountId: fromId, toAccountId: toId, flowType: 'transfer',
+      amount: cents, note: args.note || '', memberId,
+      entryDate: args.date ? `${args.date} ${nowLocal().slice(11)}` : nowLocal(),
+    });
+    return mcpResult(`已记转账 ¥${(cents / 100).toFixed(2)}：${args.from_account} → ${args.to_account}`);
+  }
+  if (name === 'list_accounts') {
+    const rows = db.prepare('SELECT name FROM account ORDER BY name').all();
+    return mcpResult(rows.map(r => r.name).join('\n'));
+  }
+  if (name === 'create_account') {
+    if (!args.name) throw new Error('账户名必填');
+    const exist = db.prepare('SELECT id FROM account WHERE name=?').get(args.name);
+    if (exist) return mcpResult(`账户"${args.name}"已存在`);
+    const id = genId('acc');
+    const now = nowIso();
+    const type = args.type || 'cash';
+    const bal = Math.round(Number(args.balance || 0) * 100);
+    db.prepare('INSERT INTO account (id,type,name,balance,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, type, args.name, bal, args.note || null, 0, now, now);
+    return mcpResult(`已创建账户：${args.name}（${type}）`);
+  }
+  if (name === 'list_categories') {
+    const rows = db.prepare("SELECT id, name, parent_id, type FROM category ORDER BY type, parent_id IS NULL, name").all();
+    const parents = {};
+    for (const r of rows) if (!r.parent_id) parents[r.id] = r.name;
+    const lines = [];
+    for (const r of rows) {
+      const tag = r.type === 'income' ? '[收入]' : '[支出]';
+      if (r.parent_id) {
+        lines.push(`${tag} ${parents[r.parent_id]} > ${r.name}`);
+      } else {
+        lines.push(`${tag} ${r.name}（一级）`);
+      }
+    }
+    return mcpResult(lines.join('\n'));
+  }
+  if (name === 'list_members') {
+    const rows = db.prepare('SELECT name FROM member ORDER BY name').all();
+    return mcpResult(rows.map(r => r.name).join('\n'));
+  }
+  if (name === 'list_platforms') {
+    const rows = db.prepare('SELECT name FROM platform ORDER BY sort, created_at').all();
+    return mcpResult(rows.map(r => r.name).join('\n'));
+  }
+  if (name === 'list_entries') {
+    const endDate = args.end_date || nowLocal().slice(0, 10);
+    const startDate = args.start_date || new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const limit = Math.min(args.limit || 20, 50);
+    const rows = db.prepare(`
+      SELECT e.id, e.entry_date, e.flow_type, e.amount, e.note, e.platform,
+             c.name AS category_name, a.name AS account_name, m.name AS member_name
+      FROM entry e
+      LEFT JOIN category c ON e.category_id = c.id
+      LEFT JOIN account a ON e.account_id = a.id
+      LEFT JOIN member m ON e.member_id = m.id
+      WHERE e.ledger_id = ? AND e.entry_date >= ? AND e.entry_date <= ?
+      ORDER BY e.entry_date DESC, e.created_at DESC LIMIT ?
+    `).all(ledgerId, startDate, endDate + ' 23:59', limit);
+    if (!rows.length) return mcpResult('该时间段无记录');
+    const lines = rows.map(r => {
+      const sign = r.flow_type === 'expense' ? '-' : r.flow_type === 'income' ? '+' : '→';
+      const cat = r.category_name || '未分类';
+      const note = r.note ? `（${r.note}）` : '';
+      return `[${r.id}] ${r.entry_date.slice(0,10)} ${sign}¥${(r.amount/100).toFixed(2)} ${cat} ${r.account_name||''}${note}`;
+    });
+    return mcpResult(lines.join('\n'));
+  }
+  if (name === 'monthly_summary') {
+    const month = args.month || nowLocal().slice(0, 7);
+    const rows = db.prepare(`
+      SELECT e.flow_type, e.amount, c.name AS category_name
+      FROM entry e LEFT JOIN category c ON e.category_id = c.id
+      WHERE e.ledger_id = ? AND e.entry_date LIKE ?
+    `).all(ledgerId, month + '%');
+    let totalExp = 0, totalInc = 0;
+    const catExp = {};
+    for (const r of rows) {
+      if (r.flow_type === 'expense' || r.flow_type === 'refund') {
+        totalExp += r.amount;
+        const cat = r.category_name || '未分类';
+        catExp[cat] = (catExp[cat] || 0) + r.amount;
+      } else if (r.flow_type === 'income') {
+        totalInc += r.amount;
+      }
+    }
+    const lines = [
+      `${month} 月度统计：`,
+      `总支出：¥${(totalExp/100).toFixed(2)}`,
+      `总收入：¥${(totalInc/100).toFixed(2)}`,
+      '分类支出：',
+    ];
+    for (const [cat, amt] of Object.entries(catExp).sort((a,b) => b[1]-a[1])) {
+      lines.push(`  ${cat}: ¥${(amt/100).toFixed(2)}`);
+    }
+    return mcpResult(lines.join('\n'));
+  }
+  if (name === 'create_category') {
+    const ft = args.flow_type === 'income' ? 'income' : 'expense';
+    const exist = db.prepare('SELECT id FROM category WHERE name=? AND type=?').get(args.name, ft);
+    if (exist) return mcpResult(`分类"${args.name}"已存在`);
+    const id = genId('cat');
+    const now = nowIso();
+    let parentId = null;
+    if (args.parent_name) {
+      const parent = db.prepare('SELECT id FROM category WHERE name=? AND parent_id IS NULL AND type=?').get(args.parent_name, ft);
+      if (!parent) return mcpResult(`一级分类"${args.parent_name}"不存在`);
+      parentId = parent.id;
+    }
+    db.prepare('INSERT INTO category (id,name,parent_id,type,sort,created_at) VALUES (?,?,?,?,?,?)')
+      .run(id, args.name, parentId, ft, 0, now);
+    return mcpResult(`已创建分类：${parentId ? args.parent_name + ' > ' : ''}${args.name}`);
+  }
+  if (name === 'delete_entry') {
+    const e = db.prepare('SELECT * FROM entry WHERE id=? AND ledger_id=?').get(args.entry_id, ledgerId);
+    if (!e) throw new Error('记录不存在');
+    db.prepare('DELETE FROM entry WHERE id=?').run(e.id);
+    return mcpResult('已删除记录');
+  }
+  if (name === 'update_entry') {
+    const e = db.prepare('SELECT * FROM entry WHERE id=? AND ledger_id=?').get(args.entry_id, ledgerId);
+    if (!e) throw new Error('记录不存在');
+    const updates = [];
+    const vals = [];
+    if (args.amount !== undefined) {
+      updates.push('amount = ?');
+      vals.push(Math.round(Number(args.amount) * 100));
+    }
+    if (args.note !== undefined) {
+      updates.push('note = ?');
+      vals.push(args.note);
+    }
+    if (args.category !== undefined) {
+      const catId = findCategoryId(ledgerId, args.category, e.flow_type);
+      if (catId) { updates.push('category_id = ?'); vals.push(catId); }
+    }
+    if (!updates.length) throw new Error('没有要修改的字段');
+    updates.push('updated_at = ?');
+    vals.push(nowIso());
+    vals.push(e.id);
+    db.prepare(`UPDATE entry SET ${updates.join(', ')} WHERE id=?`).run(...vals);
+    return mcpResult('已更新记录');
+  }
+  throw new Error('未知工具：' + name);
+}
+
+function startMcpServer() {
+  // 检查是否启用 MCP（默认不启用）
+  let mcpEnabled = false;
+  try {
+    const row = getDb().prepare("SELECT value FROM setting WHERE key='mcp_enabled'").get();
+    if (row && row.value === '1') mcpEnabled = true;
+  } catch {}
+  if (!mcpEnabled) {
+    console.log('[sinong] MCP server disabled (enable in settings)');
+    return;
+  }
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || !req.url.startsWith('/mcp')) {
+      res.writeHead(404); res.end(); return;
+    }
+    // token 鉴权：解析出绑定的用户和默认账本
+    const auth = req.headers['authorization'] || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    const mcu = token ? resolveMcpToken(token) : null;
+    if (!mcu) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -401, message: '未授权：token 无效' }, id: null }));
+      return;
+    }
+    touchUser(mcu.user_id, mcu.user_id);
+    ensureSelfMember({ uid: mcu.user_id, name: mcu.user_id });
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 1e6) req.destroy(); });
+    req.on('end', () => {
+      let msg;
+      try { msg = JSON.parse(body); } catch { res.writeHead(400); res.end(); return; }
+      const { id, method, params } = msg;
+      try {
+        let result;
+        if (method === 'initialize') {
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'sinong', version: '1.1.1' } };
+        } else if (method === 'tools/list') {
+          result = { tools: MCP_TOOLS };
+        } else if (method === 'tools/call') {
+          result = mcpCallTool(params.name, params.arguments || {}, { userId: mcu.user_id, defaultLedgerId: mcu.default_ledger_id });
+        } else if (method === 'ping' || method === 'notifications/initialized') {
+          res.writeHead(202); res.end(); return;
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32601, message: '未知方法' } }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
+      } catch (e) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message: e.message } }));
+      }
+    });
+  });
+  const port = getMcpPort();
+  server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      console.error(`[sinong] MCP port ${port} already in use, MCP disabled. Change port in settings.`);
+      try { getDb().prepare("INSERT OR REPLACE INTO setting (key,value) VALUES ('mcp_status',?)").run('error:端口' + port + '被占用'); } catch {}
+    } else {
+      console.error('[sinong] MCP server error:', e.message);
+      try { getDb().prepare("INSERT OR REPLACE INTO setting (key,value) VALUES ('mcp_status',?)").run('error:' + e.message); } catch {}
+    }
+  });
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`[sinong] MCP server on http://0.0.0.0:${port}/mcp`);
+    try { getDb().prepare("INSERT OR REPLACE INTO setting (key,value) VALUES ('mcp_status','running')").run(); } catch {}
+  });
+}
+
 // ==================== HTTP 服务 ====================
 function start() {
   initDb(DATA_DIR);
@@ -1499,6 +2017,7 @@ function start() {
     server.listen(SOCKET_PATH, () => {
       console.log(`[sinong] listening on unix socket ${SOCKET_PATH}`);
       startPeriodicScheduler();
+      startMcpServer();
     });
   } else {
     const port = PORT || 18099;
@@ -1507,6 +2026,7 @@ function start() {
       console.log(`[sinong] listening on http://0.0.0.0:${port}`);
       console.log(`[sinong] data dir: ${DATA_DIR || '(memory)'}`);
       startPeriodicScheduler();
+      startMcpServer();
     });
   }
 }
@@ -1514,12 +2034,12 @@ function start() {
 /** 周期账自动补生成：启动时立即跑一次，之后每小时检查一次（幂等） */
 function startPeriodicScheduler() {
   try {
-    const n = syncPeriodic(db);
+    const n = syncPeriodic(getDb());
     if (n > 0) console.log(`[sinong] periodic auto-posted ${n} entry(ies)`);
   } catch (e) { console.error('[sinong] periodic sync failed:', e.message); }
   setInterval(() => {
     try {
-      const n = syncPeriodic(db);
+      const n = syncPeriodic(getDb());
       if (n > 0) console.log(`[sinong] periodic auto-posted ${n} entry(ies)`);
     } catch (e) { console.error('[sinong] periodic sync failed:', e.message); }
   }, 60 * 60 * 1000);
