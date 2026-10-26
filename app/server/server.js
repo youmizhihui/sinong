@@ -1184,7 +1184,7 @@ function createRouter(user) {
       if (keyword) {
         // 备注包含关键词，或分类（子分类/父分类）名称包含关键词，或成员名称包含关键词，或账户名包含关键词
         // （member_id 为空的记录视为"自己"，命中"自己"时一并纳入）
-        where.push('(note LIKE ? OR category_id IN (SELECT id FROM category WHERE name LIKE ? OR parent_id IN (SELECT id FROM category WHERE name LIKE ?)) OR member_id IN (SELECT id FROM member WHERE name LIKE ?) OR (member_id IS NULL AND (SELECT COUNT(*) FROM member WHERE name LIKE ?) > 0) OR account_id IN (SELECT id FROM account WHERE name LIKE ?) OR to_account_id IN (SELECT id FROM account WHERE name LIKE ?))');
+        where.push('(note LIKE ? OR category_id IN (SELECT id FROM category WHERE name LIKE ? OR parent_id IN (SELECT id FROM category WHERE name LIKE ?)) OR member_id IN (SELECT id FROM member WHERE name LIKE ?) OR (member_id IS NULL AND EXISTS (SELECT 1 FROM member WHERE name LIKE ? AND relation=\'self\')) OR account_id IN (SELECT id FROM account WHERE name LIKE ?) OR to_account_id IN (SELECT id FROM account WHERE name LIKE ?))');
         vals.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
       }
       const rows = db.prepare(`SELECT * FROM entry WHERE ${where.join(' AND ')} ORDER BY entry_date DESC, created_at DESC LIMIT ? OFFSET ?`).all(...vals, limit, offset);
