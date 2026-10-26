@@ -1200,13 +1200,30 @@ function createRouter(user) {
       // 搜索聚合统计（按全部命中行统计，不受分页影响）
       let search = null;
       if (keyword) {
-        const srows = db.prepare(`SELECT flow_type, amount FROM entry WHERE ${where.join(' AND ')}`).all(...vals);
+        const srows = db.prepare(`SELECT flow_type, amount, account_id, to_account_id FROM entry WHERE ${where.join(' AND ')}`).all(...vals);
+        // 预加载涉及到的账户名，用于判断 transfer 的方向
+        const accIds = new Set();
+        for (const r of srows) { if (r.account_id) accIds.add(r.account_id); if (r.to_account_id) accIds.add(r.to_account_id); }
+        const accName = new Map();
+        if (accIds.size) {
+          const q = db.prepare(`SELECT id, name FROM account WHERE id IN (${[...accIds].map(()=>'?').join(',')})`).all(...accIds);
+          for (const a of q) accName.set(a.id, a.name);
+        }
+        const kw = `%${keyword}%`;
         const agg = { count: srows.length, expense: 0, income: 0, transfer: 0, refund: 0, netExpense: 0 };
         for (const r of srows) {
           if (r.flow_type === 'expense') agg.expense += r.amount;
           else if (r.flow_type === 'income') agg.income += r.amount;
-          else if (r.flow_type === 'transfer') agg.transfer += r.amount;
           else if (r.flow_type === 'refund') agg.refund += r.amount;
+          else if (r.flow_type === 'transfer') {
+            const fromName = accName.get(r.account_id) || '';
+            const toName = accName.get(r.to_account_id) || '';
+            const fromHit = fromName.includes(keyword);
+            const toHit = toName.includes(keyword);
+            if (fromHit && !toHit) agg.expense += r.amount;       // 从命中账户转出
+            else if (toHit && !fromHit) agg.income += r.amount;    // 转入命中账户（含信用卡还款）
+            else agg.transfer += r.amount;                          // 双方都命中或都不命中，保留为转账
+          }
         }
         agg.netExpense = agg.expense - agg.refund;
         search = agg;
