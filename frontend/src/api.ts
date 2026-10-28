@@ -51,6 +51,8 @@ export interface Account {
   type: string
   name: string
   balance: number
+  is_private?: number
+  owner_uid?: string | null
   note?: string
   currentBalance: number
 }
@@ -75,6 +77,10 @@ export interface Ledger {
   icon?: string
   template?: string
   is_default: number
+  type?: 'private' | 'shared'
+  owner_uid?: string | null
+  ownerName?: string
+  entryCount?: number
 }
 
 export interface LedgersData {

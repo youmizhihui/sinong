@@ -11,7 +11,7 @@ const data = ref<AccountsData | null>(null)
 const loading = ref(true)
 const collapsed = ref<Record<string, boolean>>({})
 const showForm = ref(false)
-const form = ref({ type: 'cash', name: '', balance: '' })
+const form = ref({ type: 'cash', name: '', balance: '', isPrivate: false })
 const showTop = ref(false)
 
 const TYPE_LABEL: Record<string, string> = {
@@ -31,7 +31,7 @@ const creatableTypes = computed(() => {
 })
 
 async function load() {
-  data.value = await api.get<AccountsData>('accounts')
+  data.value = await api.get<AccountsData>('accounts?scope=all')
   loading.value = false
 }
 
@@ -61,9 +61,10 @@ async function create() {
     type: form.value.type,
     name: form.value.name.trim(),
     balance: Number.isFinite(balance) ? balance : 0,
+    isPrivate: form.value.isPrivate,
   })
   showForm.value = false
-  form.value = { type: 'cash', name: '', balance: '' }
+  form.value = { type: 'cash', name: '', balance: '', isPrivate: false }
   await load()
 }
 
@@ -123,6 +124,7 @@ onActivated(load)
             <div class="row-main">
               <div class="row-title">
                 {{ a.name }}
+                <span v-if="a.is_private" class="private-tag">私有</span>
                 <span v-if="a.type === 'archived'" class="archived-tag">已封存</span>
               </div>
               <div class="muted">{{ a.note || TYPE_DESC[a.type] || '' }}</div>
@@ -150,6 +152,11 @@ onActivated(load)
         </div>
         <input v-model="form.name" class="field" placeholder="账户名称（必填）" />
         <input v-model="form.balance" class="field" type="number" placeholder="初始余额（元，默认 0，可负）" />
+        <label class="privacy-row">
+          <input v-model="form.isPrivate" type="checkbox" />
+          <span>私有账户</span>
+          <small>仅在私人账本中可见，共享成员看不到</small>
+        </label>
         <div class="sheet-actions">
           <button class="btn ghost" @click="showForm = false">取消</button>
           <button class="btn primary" :disabled="!form.name.trim()" @click="create">保存</button>
@@ -195,6 +202,10 @@ onActivated(load)
   font-size: 10px; padding: 1px 6px; border-radius: 4px;
   background: #F3F4F6; color: #9CA3AF; font-weight: 400;
 }
+.private-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  background: #FEF3C7; color: #92400E; font-weight: 400;
+}
 .row.archived { opacity: 0.55; }
 
 .page-head { display: flex; align-items: center; justify-content: space-between; }
@@ -225,6 +236,11 @@ onActivated(load)
   border: 1px solid var(--border); border-radius: 10px;
   padding: 10px 12px; width: 100%;
 }
+.privacy-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; cursor: pointer;
+}
+.privacy-row small { color: var(--text2); font-size: 11px; margin-left: 4px; }
 .sheet-actions { display: flex; gap: 10px; }
 .btn {
   flex: 1; padding: 12px; border-radius: 10px;

@@ -256,6 +256,14 @@ function requireLedgerAccess(uid, ledgerId) {
   if (!canAccessLedger(uid, ledgerId)) throw httpError(403, '无权访问该账本');
 }
 
+/** 当前账本类型：shared 或 private。无当前账本时默认 private */
+function getCurrentLedgerType() {
+  const cur = getDb().prepare("SELECT value FROM setting WHERE key='current_ledger'").get();
+  if (!cur || !cur.value) return 'private';
+  const lg = getDb().prepare('SELECT type FROM ledger WHERE id=?').get(cur.value);
+  return lg ? lg.type : 'private';
+}
+
 /** 本地日期 YYYY-MM-DD */
 function today() {
   const d = new Date();
@@ -438,6 +446,27 @@ function createEntry(user, body) {
   if (!['expense', 'income', 'transfer'].includes(flowType)) throw httpError(400, '无效流水类型');
   if (!Number.isInteger(amount) || amount <= 0) throw httpError(400, '金额必须为正整数（分）');
   if (flowType === 'transfer' && !toAccountId) throw httpError(400, '转账需指定转入账户');
+
+  // 校验账户与账本类型匹配：共享账本只能用 shared 账户，私人账本只能用 private 账户
+  const lg = db.prepare('SELECT type FROM ledger WHERE id=?').get(ledgerId);
+  if (lg) {
+    const isShared = lg.type === 'shared';
+    const acc = db.prepare('SELECT name, is_private, owner_uid FROM account WHERE id=?').get(accountId);
+    if (acc && isShared && acc.is_private) throw httpError(400, `「${acc.name}」是私有账户，不能在共享账本记账`);
+    if (acc && !isShared && !acc.is_private) throw httpError(400, `「${acc.name}」是共享账户，不能在私人账本记账`);
+    // 私人账本里的 private 账户必须是本人的
+    if (acc && !isShared && acc.is_private && acc.owner_uid && acc.owner_uid !== user.uid) {
+      throw httpError(400, `「${acc.name}」不是你的私有账户`);
+    }
+    if (toAccountId) {
+      const toAcc = db.prepare('SELECT name, is_private, owner_uid FROM account WHERE id=?').get(toAccountId);
+      if (toAcc && isShared && toAcc.is_private) throw httpError(400, `「${toAcc.name}」是私有账户，不能在共享账本记账`);
+      if (toAcc && !isShared && !toAcc.is_private) throw httpError(400, `「${toAcc.name}」是共享账户，不能在私人账本记账`);
+      if (toAcc && !isShared && toAcc.is_private && toAcc.owner_uid && toAcc.owner_uid !== user.uid) {
+        throw httpError(400, `「${toAcc.name}」不是你的私有账户`);
+      }
+    }
+  }
 
   const id = genId('en');
   const now = nowIso();
@@ -710,8 +739,21 @@ function createRouter(user) {
     },
 
     // ---- 账户 ----
-    'GET /api/accounts': () => {
-      const accs = db.prepare('SELECT * FROM account ORDER BY sort, created_at').all();
+    'GET /api/accounts': (_b, _p, req) => {
+      const user = getUser(req);
+      const ledgerType = getCurrentLedgerType();
+      const url = new URL(req.url, 'http://localhost');
+      const scope = url.searchParams.get('scope') || 'ledger';
+      // scope=all：账户管理页用，显示所有可见账户（shared + 自己的 private）
+      // scope=ledger：记一笔页用，只显示当前账本类型对应的账户
+      let accs;
+      if (scope === 'all') {
+        accs = db.prepare('SELECT * FROM account WHERE is_private=0 OR owner_uid=? ORDER BY sort, created_at').all(user.uid);
+      } else {
+        accs = ledgerType === 'shared'
+          ? db.prepare('SELECT * FROM account WHERE is_private=0 ORDER BY sort, created_at').all()
+          : db.prepare('SELECT * FROM account WHERE is_private=1 AND owner_uid=? ORDER BY sort, created_at').all(user.uid);
+      }
       const bals = computeBalances();
       const list = accs.map((a) => ({ ...a, currentBalance: (a.balance || 0) + (bals.get(a.id) || 0) }));
       // 按类型分组统计
@@ -727,13 +769,15 @@ function createRouter(user) {
       const totalLiabilities = Math.abs(list.filter((a) => a.currentBalance < 0).reduce((s, a) => s + a.currentBalance, 0));
       return { groups: Object.values(groups), netWorth, totalAssets, totalLiabilities };
     },
-    'POST /api/accounts': async (body) => {
-      const { type, name, balance, note } = body;
+    'POST /api/accounts': async (body, _p, req) => {
+      const user = getUser(req);
+      const { type, name, balance, note, isPrivate } = body;
       if (!type || !name) throw httpError(400, '类型与名称必填');
       const id = genId('acc');
       const now = nowIso();
-      db.prepare('INSERT INTO account (id,type,name,balance,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
-        .run(id, type, name, Number.isInteger(balance) ? balance : 0, note || null, 0, now, now);
+      const isPrivateVal = isPrivate ? 1 : 0;
+      db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(id, type, name, Number.isInteger(balance) ? balance : 0, isPrivateVal, user.uid, note || null, 0, now, now);
       return db.prepare('SELECT * FROM account WHERE id=?').get(id);
     },
     'GET /api/accounts/:id': (_b, p) => {
@@ -762,6 +806,9 @@ function createRouter(user) {
       if (body.note !== undefined) { fields.push('note=?'); vals.push(body.note || null); }
       if (body.type !== undefined) { fields.push('type=?'); vals.push(body.type); }
       if (body.balance !== undefined && Number.isInteger(body.balance)) { fields.push('balance=?'); vals.push(body.balance); }
+      if (body.isPrivate !== undefined) {
+        fields.push('is_private=?'); vals.push(body.isPrivate ? 1 : 0);
+      }
       if (!fields.length) return db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
       fields.push('updated_at=?'); vals.push(nowIso()); vals.push(p.id);
       db.prepare(`UPDATE account SET ${fields.join(',')} WHERE id=?`).run(...vals);
@@ -791,7 +838,11 @@ function createRouter(user) {
       const ledgers = ls.map((l) => {
         const n = db.prepare('SELECT COUNT(*) AS n FROM entry WHERE ledger_id=?').get(l.id).n;
         const members = db.prepare('SELECT user_id, perm FROM ledger_share WHERE ledger_id=?').all(l.id);
-        return { ...l, entryCount: n, members };
+        // 查 owner 名字
+        const owner = l.owner_uid
+          ? db.prepare("SELECT name FROM member WHERE fnos_uid=?").get(l.owner_uid)
+          : null;
+        return { ...l, entryCount: n, members, ownerName: owner ? owner.name : '' };
       });
       return { ledgers, currentLedgerId: cur ? cur.value : (ls[0] ? ls[0].id : null) };
     },
@@ -832,11 +883,60 @@ function createRouter(user) {
         throw httpError(403, '只有账本所有者能修改类型');
       }
       const fields = []; const vals = [];
+      let resChangedAccs = [];
+      let resSkippedAccs = [];
       if (body.name !== undefined) { fields.push('name=?'); vals.push(body.name); }
       if (body.icon !== undefined) { fields.push('icon=?'); vals.push(body.icon); }
       if (body.type !== undefined) {
         const newType = body.type === 'shared' ? 'shared' : 'private';
+        let changedAccs = [];
+        let skippedAccs = [];
+        // 私人账本转共享：自动把只在当前账本里出现的私有账户改成共享
+        if (newType === 'shared' && l.type === 'private') {
+          const accs = db.prepare(`
+            SELECT DISTINCT a.id, a.name FROM account a
+            JOIN entry e ON (e.account_id = a.id OR e.to_account_id = a.id)
+            WHERE e.ledger_id=? AND a.is_private=1
+          `).all(p.id);
+          for (const acc of accs) {
+            // 检查这个账户是否在其他账本里也有流水
+            const otherCount = db.prepare(`
+              SELECT COUNT(*) AS n FROM entry e
+              WHERE (e.account_id=? OR e.to_account_id=?) AND e.ledger_id != ?
+            `).get(acc.id, acc.id, p.id).n;
+            if (otherCount > 0) {
+              skippedAccs.push(acc);
+            } else {
+              db.prepare('UPDATE account SET is_private=0, owner_uid=NULL, updated_at=? WHERE id=?')
+                .run(new Date().toISOString(), acc.id);
+              changedAccs.push(acc);
+            }
+          }
+        }
+        // 共享账本转私人：自动把只在当前账本里出现的共享账户改成私有
+        if (newType === 'private' && l.type === 'shared') {
+          const accs = db.prepare(`
+            SELECT DISTINCT a.id, a.name FROM account a
+            JOIN entry e ON (e.account_id = a.id OR e.to_account_id = a.id)
+            WHERE e.ledger_id=? AND a.is_private=0
+          `).all(p.id);
+          for (const acc of accs) {
+            const otherCount = db.prepare(`
+              SELECT COUNT(*) AS n FROM entry e
+              WHERE (e.account_id=? OR e.to_account_id=?) AND e.ledger_id != ?
+            `).get(acc.id, acc.id, p.id).n;
+            if (otherCount > 0) {
+              skippedAccs.push(acc);
+            } else {
+              db.prepare('UPDATE account SET is_private=1, owner_uid=?, updated_at=? WHERE id=?')
+                .run(user.uid, new Date().toISOString(), acc.id);
+              changedAccs.push(acc);
+            }
+          }
+        }
         fields.push('type=?'); vals.push(newType);
+        resChangedAccs = changedAccs;
+        resSkippedAccs = skippedAccs;
       }
       if (!fields.length) return l;
       vals.push(p.id);
@@ -848,12 +948,47 @@ function createRouter(user) {
           // 转共享：确保 owner 在共享成员里
           db.prepare('INSERT OR IGNORE INTO ledger_share (ledger_id,user_id,perm) VALUES (?,?,?)')
             .run(p.id, l.owner_uid, 'rw');
+          // 用户选择"所有人可见"时，加 '*' 记录
+          if (body.shareToAll) {
+            db.prepare('INSERT OR IGNORE INTO ledger_share (ledger_id,user_id,perm) VALUES (?,?,?)')
+              .run(p.id, '*', 'rw');
+          }
         } else {
           // 转私有：清除所有共享成员（owner 仍通过 owner_uid 拥有）
           db.prepare('DELETE FROM ledger_share WHERE ledger_id=?').run(p.id);
         }
       }
-      return db.prepare('SELECT * FROM ledger WHERE id=?').get(p.id);
+      const updated = db.prepare('SELECT * FROM ledger WHERE id=?').get(p.id);
+      if (resChangedAccs.length || resSkippedAccs.length) {
+        const parts = [];
+        if (resChangedAccs.length) {
+          const names = resChangedAccs.map((a) => `「${a.name}」`).join('、');
+          parts.push(`${names}已同步变更`);
+        }
+        if (resSkippedAccs.length) {
+          const names = resSkippedAccs.map((a) => `「${a.name}」`).join('、');
+          parts.push(`${names}因在其他账本有记录未变更`);
+        }
+        return { ...updated, notice: parts.join('；') };
+      }
+      return updated;
+    },
+    'GET /api/ledgers/:id/affected-accounts': (_b, p) => {
+      // 返回这个账本里用到的所有账户，以及每个账户是否在其他账本也有记录
+      const accs = db.prepare(`
+        SELECT DISTINCT a.id, a.name, a.is_private FROM account a
+        JOIN entry e ON (e.account_id = a.id OR e.to_account_id = a.id)
+        WHERE e.ledger_id=?
+        ORDER BY a.name
+      `).all(p.id);
+      const result = accs.map((a) => {
+        const otherCount = db.prepare(`
+          SELECT COUNT(*) AS n FROM entry e
+          WHERE (e.account_id=? OR e.to_account_id=?) AND e.ledger_id != ?
+        `).get(a.id, a.id, p.id).n;
+        return { ...a, inOtherLedgers: otherCount > 0 };
+      });
+      return { accounts: result };
     },
     'DELETE /api/ledgers/:id': async (_b, p) => {
       const l = db.prepare('SELECT * FROM ledger WHERE id=?').get(p.id);
@@ -1926,7 +2061,7 @@ function startMcpServer() {
       try {
         let result;
         if (method === 'initialize') {
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'sinong', version: '1.1.1' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'sinong', version: '1.2.0' } };
         } else if (method === 'tools/list') {
           result = { tools: MCP_TOOLS };
         } else if (method === 'tools/call') {

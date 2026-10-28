@@ -60,6 +60,10 @@ const currentLedgerName = computed(() => {
   if (l) return l.name
   return ledgers.value[0]?.name || '默认账本'
 })
+const currentLedgerType = computed(() => {
+  const l = ledgers.value.find((x) => x.id === store.settings.currentLedgerId)
+  return l?.type || 'shared'
+})
 
 async function switchLedger(l: Ledger) {
   if (l.id === store.settings.currentLedgerId) { showLedger.value = false; return }
@@ -241,6 +245,9 @@ onDeactivated(() => {
         <button class="hero-ledger" @click="showLedger = true">
           <BookOpen :size="15" />
           {{ currentLedgerName }}
+          <span class="hero-ledger-tag" :class="currentLedgerType === 'private' ? 'private' : 'shared'">
+            {{ currentLedgerType === 'private' ? '私' : '共' }}
+          </span>
           <ChevronDown :size="13" class="chip-arrow" />
         </button>
         <span class="hero-eye" @click="store.settings.hideAmount = !store.settings.hideAmount">
@@ -340,6 +347,9 @@ onDeactivated(() => {
         >
           <BookOpen :size="15" class="li-icon" />
           <span class="li-name">{{ l.name }}</span>
+          <span v-if="l.type === 'private'" class="li-type private">私</span>
+          <span v-else class="li-type shared">共</span>
+          <span v-if="l.ownerName" class="li-owner">{{ l.ownerName }}</span>
           <span v-if="l.id === store.settings.currentLedgerId" class="li-check">✓</span>
         </button>
         <button class="ledger-manage" @click="router.push('/ledgers')">管理账本 →</button>
@@ -367,6 +377,10 @@ onDeactivated(() => {
 .li-icon { color: var(--text2); }
 .ledger-item.sel .li-icon { color: var(--brand); }
 .li-name { flex: 1; text-align: left; }
+.li-owner { font-size: 11px; color: var(--text2); margin-left: 6px; }
+.li-type { font-size: 10px; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
+.li-type.private { background: #FEF3C7; color: #92400E; }
+.li-type.shared { background: #DBEAFE; color: #1E40AF; }
 .ledger-manage {
   margin: 6px 8px 0; padding: 10px 0; text-align: center;
   border-radius: 12px; border: 1px dashed var(--border);
@@ -385,6 +399,9 @@ onDeactivated(() => {
   font-size: 13px; font-weight: 600;
 }
 .chip-arrow { opacity: 0.75; }
+.hero-ledger-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 500; }
+.hero-ledger-tag.private { background: rgba(251, 191, 36, 0.9); color: #78350F; }
+.hero-ledger-tag.shared { background: rgba(147, 197, 253, 0.9); color: #1E3A8A; }
 .hero-eye { cursor: pointer; padding: 4px; }
 .hero-label { font-size: 12px; color: rgba(255, 255, 255, 0.78); margin-top: 10px; }
 .hero-amount { font-size: 30px; font-weight: 700; margin: 2px 0 2px; }

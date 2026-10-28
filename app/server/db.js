@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS account (
   type       TEXT NOT NULL,
   name       TEXT NOT NULL,
   balance    INTEGER NOT NULL DEFAULT 0,
+  is_private INTEGER NOT NULL DEFAULT 0,
+  owner_uid  TEXT,
   note       TEXT,
   sort       INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
@@ -249,6 +251,13 @@ function migrate() {
   if (!enCols.some((c) => c.name === 'platform')) {
     db.exec('ALTER TABLE entry ADD COLUMN platform TEXT');
   }
+  const accCols = db.prepare('PRAGMA table_info(account)').all();
+  if (!accCols.some((c) => c.name === 'is_private')) {
+    db.exec('ALTER TABLE account ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!accCols.some((c) => c.name === 'owner_uid')) {
+    db.exec('ALTER TABLE account ADD COLUMN owner_uid TEXT');
+  }
   // 历史导入残留的负金额修正：系统约定 amount 恒为正，方向由 flow_type 决定
   db.exec('UPDATE entry SET amount = ABS(amount) WHERE amount < 0');
   // 默认消费平台种子（表空时才插入，用户自定义后不再覆盖）
@@ -297,25 +306,28 @@ function seedCategories() {
   }
 }
 
-/** 幂等创建默认账本（首次使用时，私有类型，owner_uid 待首次访问时绑定） */
+/** 幂等创建默认账本（首次使用时，共享类型，所有人可见） */
 function seedDefaultLedger() {
   const row = db.prepare('SELECT COUNT(*) AS n FROM ledger').get();
   if (row.n === 0) {
     const now = new Date().toISOString();
     const id = genId('lg');
     db.prepare('INSERT INTO ledger (id,name,icon,template,is_default,type,owner_uid,created_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id, '日常账本', 'book-open', 'daily', 1, 'private', null, now);
+      .run(id, '家庭账本', 'book-open', 'daily', 1, 'shared', null, now);
+    // 所有人可见
+    db.prepare('INSERT INTO ledger_share (ledger_id, user_id, perm) VALUES (?,?,?)')
+      .run(id, '*', 'rw');
   }
 }
 
-/** 幂等创建默认账户：安装即有一个「现金」账户 */
+/** 幂等创建默认账户：安装即有一个「现金」账户（共享） */
 function seedDefaultAccount() {
   const row = db.prepare('SELECT COUNT(*) AS n FROM account').get();
   if (row.n === 0) {
     const now = new Date().toISOString();
     db.prepare(
-      'INSERT INTO account (id,type,name,balance,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)'
-    ).run(genId('acc'), 'cash', '现金', 0, null, 0, now, now);
+      'INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
+    ).run(genId('acc'), 'cash', '现金', 0, 0, null, null, 0, now, now);
   }
 }
 

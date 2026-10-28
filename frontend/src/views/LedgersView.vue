@@ -16,6 +16,7 @@ interface Ledger {
   is_default: number
   type?: 'private' | 'shared'
   owner_uid?: string | null
+  ownerName?: string
   entryCount?: number
   members?: LedgerMember[]
 }
@@ -32,6 +33,7 @@ const addType = ref<'private' | 'shared'>('shared')
 const showEdit = ref(false)
 const editName = ref('')
 const editType = ref<'private' | 'shared'>('private')
+const editShareToAll = ref(false)
 const showMembers = ref(false)
 const memberTarget = ref<Ledger | null>(null)
 const memberList = ref<LedgerMember[]>([])
@@ -76,14 +78,44 @@ async function editLedger() {
   if (!menuTarget.value) return
   editName.value = menuTarget.value.name
   editType.value = menuTarget.value.type || 'private'
+  editShareToAll.value = false
   showEdit.value = true
 }
 async function saveEdit() {
   if (!editName.value.trim()) { showToast('请输入账本名称'); return }
   if (!menuTarget.value) return
+  // 类型变更时，先查受影响的账户并确认
+  if (menuTarget.value.type !== editType.value) {
+    try {
+      const d = await api.get<{ accounts: { id: string; name: string; is_private: number; inOtherLedgers: boolean }[] }>(`ledgers/${menuTarget.value.id}/affected-accounts`)
+      const accs = d.accounts || []
+      if (accs.length) {
+        const toChange = accs.filter((a) => !a.inOtherLedgers)
+        const toSkip = accs.filter((a) => a.inOtherLedgers)
+        let msg = ''
+        if (toChange.length) {
+          const names = toChange.map((a) => `「${a.name}」`).join('、')
+          msg += editType.value === 'shared'
+            ? `${names} 将同步变更为共享账户。\n`
+            : `${names} 将同步变更为私有账户。\n`
+        }
+        if (toSkip.length) {
+          const names = toSkip.map((a) => `「${a.name}」`).join('、')
+          msg += `${names} 因在其他账本中有记录，本次不做修改。\n该账本将无法使用这些账户记账，如需变更请手动到账户管理修改。`
+        }
+        await showConfirmDialog({ title: '确认切换账本类型', message: msg, confirmButtonText: '确认切换', cancelButtonText: '取消' })
+      }
+    } catch {
+      return
+    }
+  }
   saving.value = true
   try {
-    await api.put(`ledgers/${menuTarget.value.id}`, { name: editName.value.trim(), type: editType.value })
+    const payload: Record<string, unknown> = { name: editName.value.trim(), type: editType.value }
+    if (menuTarget.value.type !== 'shared' && editType.value === 'shared' && editShareToAll.value) {
+      payload.shareToAll = true
+    }
+    await api.put(`ledgers/${menuTarget.value.id}`, payload)
     showEdit.value = false
     showToast('已保存')
     await load()
@@ -205,7 +237,7 @@ async function toggleMember(u: FnosUser) {
             <span v-if="l.type === 'private'" class="type-tag private"><Lock :size="10" /> 私人</span>
             <span v-else class="type-tag shared"><Users :size="10" /> 共享</span>
           </div>
-          <div class="muted">{{ l.entryCount ?? 0 }} 笔</div>
+          <div class="muted">{{ l.entryCount ?? 0 }} 笔<span v-if="l.ownerName"> · {{ l.ownerName }}</span></div>
         </div>
         <button class="more-btn" @click.stop="openMenu(l)"><MoreHorizontal :size="18" /></button>
       </div>
@@ -274,6 +306,10 @@ async function toggleMember(u: FnosUser) {
           </button>
         </div>
         <div v-if="editType === 'shared'" class="type-tip">转为共享后可在成员管理中添加家人</div>
+        <label v-if="editType === 'shared' && menuTarget?.type !== 'shared'" class="share-all-row">
+          <input type="checkbox" v-model="editShareToAll" />
+          <span>所有人可见（家人打开即见，无需手动添加）</span>
+        </label>
         <button class="save-btn" :disabled="saving" @click="saveEdit">保存</button>
       </div>
     </van-popup>
@@ -386,6 +422,8 @@ async function toggleMember(u: FnosUser) {
 }
 .type-opt.on { background: var(--brand-soft); color: var(--brand); border-color: var(--brand); font-weight: 600; }
 .type-tip { font-size: 12px; color: var(--text2); margin-top: 8px; text-align: center; }
+.share-all-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--text); cursor: pointer; }
+.share-all-row input { width: 16px; height: 16px; }
 .save-btn {
   width: 100%; margin-top: 18px; padding: 13px 0; border-radius: 12px;
   background: var(--brand); color: #fff; font-size: 15px; font-weight: 600;
