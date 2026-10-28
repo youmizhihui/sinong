@@ -1,5 +1,5 @@
 appname=sinong
-version=1.2.1
+version=1.2.2
 display_name=司农记账
 desc=<p><strong>司农记账——把家庭账本搬回自己 NAS</strong></p><p>本地优先的家庭记账应用，告别云端账本的隐私顾虑：每一笔收支都只保存在你的飞牛 NAS 上，不经过任何第三方服务器，无广告、无追踪、无订阅。</p><p>支持私人账本与共享账本，家人共用一本账也能各自登录查看；记一笔分类快捷选择、消费平台标记、凭证拍照一应俱全，导入账单可自动识别格式，日常记账几秒完成。</p><p>支持 MCP Server，可通过 OpenClaw 等 AI 助手用对话完成记账、查账、统计，截图即记、说话即记。</p><p>遇到问题或有建议？欢迎到 <a href="https://feedback.youmizhihui.com/" target="_blank">反馈页面</a> 提交。</p><p><strong>安全提醒：</strong>开启 MCP Server 后请勿将端口映射到公网，否则他人破解 Token 后可直接访问你的账本数据。</p>
 source=thirdparty
@@ -15,4 +15,4 @@ ctl_stop=true
 checkport=false
 micro_app=true
 install_dep_apps=nodejs_v22
-changelog=<p><strong>v1.2.1 更新内容：</strong></p><ul><li>账本导出 Excel 新增「账户」sheet，含账户分类与状态</li><li>导入时按「账户」sheet 还原账户类型，修复信用卡/已封存账户被误归为现金的问题</li><li>成员管理新增「允许所有人访问」开关</li></ul>
+changelog=<p><strong>v1.2.2 更新内容：</strong></p><ul><li>预算功能重构：支持总预算 + 一级分类子预算 + 二级子子预算的层级结构</li><li>创建预算更轻松：右上角加号直接设总预算，卡片上加号逐级添加子预算</li><li>子预算金额不能超过上级预算，自动校验并提示剩余可分配额度</li><li>预算列表改为可折叠的树形展示，层级一目了然</li></ul>

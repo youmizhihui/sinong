@@ -706,6 +706,52 @@ function httpError(code, msg) {
   return err;
 }
 
+// 预算金额校验：子预算合计不能超过上级预算
+// categoryId=null 表示总预算；excludeId 为编辑时排除自身的预算 id
+function validateBudgetAmount(db, ledgerId, month, categoryId, amount, excludeId) {
+  const yuan = (f) => (f / 100).toFixed(2);
+  let cat = null;
+  if (categoryId) {
+    cat = db.prepare('SELECT id,parent_id,name FROM category WHERE id=?').get(categoryId);
+    if (!cat) throw httpError(400, '分类不存在');
+  }
+  if (!cat) {
+    // 总预算：已有子预算合计不能超过总预算金额
+    const childrenSum = db.prepare('SELECT COALESCE(SUM(amount),0) AS s FROM budget WHERE ledger_id=? AND month=? AND id<>? AND category_id IS NOT NULL')
+      .get(ledgerId, month, excludeId || '').s || 0;
+    if (childrenSum > amount) {
+      throw httpError(400, `子预算合计 ${yuan(childrenSum)} 元已超过总预算，请先调低子预算`);
+    }
+    return;
+  }
+  if (cat.parent_id) {
+    // 二级子预算：上级 = 一级分类预算
+    const parent = db.prepare('SELECT b.*, c.name AS parent_name FROM budget b JOIN category c ON c.id=b.category_id WHERE b.ledger_id=? AND b.month=? AND b.category_id=?')
+      .get(ledgerId, month, cat.parent_id);
+    if (!parent) throw httpError(400, `请先给「一级分类」设置预算，才能添加子预算`);
+    const others = db.prepare('SELECT COALESCE(SUM(amount),0) AS s FROM budget WHERE ledger_id=? AND month=? AND id<>? AND category_id IN (SELECT id FROM category WHERE parent_id=?)')
+      .get(ledgerId, month, excludeId || '', cat.parent_id).s || 0;
+    if (others + amount > parent.amount) {
+      throw httpError(400, `超出「${parent.parent_name}」预算，剩余可分配 ${yuan(Math.max(0, parent.amount - others))} 元`);
+    }
+  } else {
+    // 一级分类预算：上级 = 总预算；同时其自身子预算合计不能超过新金额
+    const childrenSum = db.prepare('SELECT COALESCE(SUM(amount),0) AS s FROM budget WHERE ledger_id=? AND month=? AND id<>? AND category_id IN (SELECT id FROM category WHERE parent_id=?)')
+      .get(ledgerId, month, excludeId || '', cat.id).s || 0;
+    if (childrenSum > amount) {
+      throw httpError(400, `其下子预算合计 ${yuan(childrenSum)} 元，金额不能低于该值`);
+    }
+    const total = db.prepare('SELECT * FROM budget WHERE ledger_id=? AND month=? AND category_id IS NULL').get(ledgerId, month);
+    if (total) {
+      const others = db.prepare('SELECT COALESCE(SUM(amount),0) AS s FROM budget WHERE ledger_id=? AND month=? AND id<>? AND category_id IN (SELECT id FROM category WHERE parent_id IS NULL)')
+        .get(ledgerId, month, excludeId || '').s || 0;
+      if (others + amount > total.amount) {
+        throw httpError(400, `超出总预算，剩余可分配 ${yuan(Math.max(0, total.amount - others))} 元`);
+      }
+    }
+  }
+}
+
 // ==================== 路由 ====================
 function createRouter(user) {
   const db = getDb();
@@ -1023,11 +1069,39 @@ function createRouter(user) {
       if (ledgerId) { where.push('ledger_id=?'); vals.push(ledgerId); }
       if (month) { where.push('month=?'); vals.push(month); }
       const rows = db.prepare(`SELECT * FROM budget WHERE ${where.join(' AND ')} ORDER BY created_at`).all(...vals);
+      // 当月各分类的直接支出（一次聚合查询）
+      const perCat = new Map();
+      let monthTotal = 0;
+      if (month && rows.length) {
+        for (const r of db.prepare("SELECT category_id, COALESCE(SUM(amount),0) AS s FROM entry WHERE ledger_id=? AND flow_type='expense' AND entry_date LIKE ? GROUP BY category_id")
+          .all(rows[0].ledger_id, month + '%')) {
+          perCat.set(r.category_id, r.s || 0);
+          monthTotal += r.s || 0;
+        }
+      }
+      const catParent = new Map(db.prepare('SELECT id,parent_id FROM category').all().map((c) => [c.id, c.parent_id]));
+      const subtreeSpent = (catId) => {
+        let s = perCat.get(catId) || 0;
+        for (const [cid, pid] of catParent) if (pid === catId) s += perCat.get(cid) || 0;
+        return s;
+      };
       const items = rows.map((b) => {
-        const spent = month
-          ? (db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM entry WHERE ledger_id=? AND category_id=? AND flow_type='expense' AND entry_date LIKE ?")
-            .get(b.ledger_id, b.category_id, month + '%').s || 0)
-          : 0;
+        let spent = 0;
+        if (month) {
+          if (!b.category_id) {
+            // 总预算：账本当月全部支出
+            spent = monthTotal;
+          } else if (catParent.get(b.category_id)) {
+            // 二级分类预算：只统计本级支出
+            spent = perCat.get(b.category_id) || 0;
+          } else {
+            // 一级分类预算：本级+子分类支出，扣除已由二级子预算覆盖的部分（避免与子子预算重复计数）
+            const childBudgetSpent = rows
+              .filter((r) => r.category_id && catParent.get(r.category_id) === b.category_id)
+              .reduce((s, r) => s + (perCat.get(r.category_id) || 0), 0);
+            spent = subtreeSpent(b.category_id) - childBudgetSpent;
+          }
+        }
         return { ...b, spent };
       });
       return { items };
@@ -1035,17 +1109,23 @@ function createRouter(user) {
     'POST /api/budgets': async (body, _p, req) => {
       const user = getUser(req);
       const { ledgerId, categoryId, month, amount } = body;
-      if (!ledgerId || !categoryId || !month) throw httpError(400, '账本、分类与月份必填');
+      // categoryId 不传 = 总预算（所有分类）
+      if (!ledgerId || !month) throw httpError(400, '账本与月份必填');
       requireLedgerAccess(user.uid, ledgerId);
       if (!Number.isInteger(amount) || amount <= 0) throw httpError(400, '预算金额必须为正整数（分）');
-      const exists = db.prepare('SELECT * FROM budget WHERE ledger_id=? AND category_id=? AND month=?').get(ledgerId, categoryId, month);
+      const cat = categoryId || null;
+      const exists = cat
+        ? db.prepare('SELECT * FROM budget WHERE ledger_id=? AND category_id=? AND month=?').get(ledgerId, cat, month)
+        : db.prepare('SELECT * FROM budget WHERE ledger_id=? AND category_id IS NULL AND month=?').get(ledgerId, month);
       if (exists) {
+        validateBudgetAmount(db, ledgerId, month, cat, amount, exists.id);
         db.prepare('UPDATE budget SET amount=? WHERE id=?').run(amount, exists.id);
         return db.prepare('SELECT * FROM budget WHERE id=?').get(exists.id);
       }
+      validateBudgetAmount(db, ledgerId, month, cat, amount, null);
       const id = genId('bud');
       db.prepare('INSERT INTO budget (id,ledger_id,category_id,month,amount,created_at) VALUES (?,?,?,?,?,?)')
-        .run(id, ledgerId, categoryId, month, amount, nowIso());
+        .run(id, ledgerId, cat, month, amount, nowIso());
       return db.prepare('SELECT * FROM budget WHERE id=?').get(id);
     },
     'PUT /api/budgets/:id': async (body, p) => {
@@ -1053,11 +1133,18 @@ function createRouter(user) {
       if (!b) throw httpError(404, '预算不存在');
       if (body.amount !== undefined) {
         if (!Number.isInteger(body.amount) || body.amount <= 0) throw httpError(400, '预算金额必须为正整数（分）');
+        validateBudgetAmount(db, b.ledger_id, b.month, b.category_id, body.amount, b.id);
         db.prepare('UPDATE budget SET amount=? WHERE id=?').run(body.amount, p.id);
       }
       return db.prepare('SELECT * FROM budget WHERE id=?').get(p.id);
     },
     'DELETE /api/budgets/:id': async (_b, p) => {
+      const b = db.prepare('SELECT * FROM budget WHERE id=?').get(p.id);
+      // 删除一级分类预算时，级联删除其下的二级子预算
+      if (b && b.category_id) {
+        db.prepare('DELETE FROM budget WHERE ledger_id=? AND month=? AND category_id IN (SELECT id FROM category WHERE parent_id=?)')
+          .run(b.ledger_id, b.month, b.category_id);
+      }
       db.prepare('DELETE FROM budget WHERE id=?').run(p.id);
       return { ok: true };
     },
