@@ -182,6 +182,8 @@ export interface PlatformItem {
 export interface Settings {
   currentLedgerId: string | null
   hideAmount: boolean
+  /** 应用版本号，来源：manifest（服务端启动时读取） */
+  version?: string
 }
 
 export interface FnosUser {

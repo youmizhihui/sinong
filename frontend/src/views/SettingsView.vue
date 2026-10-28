@@ -345,7 +345,7 @@ async function confirmImport() {
         <span class="icon-badge"><Download :size="18" /></span>
         <div class="row-main">
           <div class="row-title">导出数据</div>
-          <div class="muted">导出当前账本全部记录为 Excel（支出/收入/转账分 sheet）</div>
+          <div class="muted">导出当前账本全部记录为 Excel（支出/收入/转账/账户 分 sheet，账户含分类与状态）</div>
         </div>
         <span class="muted">›</span>
       </div>

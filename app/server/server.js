@@ -17,6 +17,17 @@ const { initDb, getDb, genId, touchUser, getUsers } = require('./db');
 const { parseWorkbook, doImport, extractWorkbookStructure } = require('./import');
 const XLSX = require('xlsx');
 
+/** 应用版本：唯一来源是项目根目录的 manifest（version= 行），启动时读取一次 */
+const APP_VERSION = (() => {
+  try {
+    const manifestPath = process.env.TRIM_APPDEST
+      ? path.join(process.env.TRIM_APPDEST, 'manifest')
+      : path.join(__dirname, '..', '..', 'manifest');
+    const m = /^version=(.+)$/m.exec(fs.readFileSync(manifestPath, 'utf-8'));
+    return m ? m[1].trim() : 'unknown';
+  } catch { return 'unknown'; }
+})();
+
 /** 导入预览缓存：token → 解析结果（5分钟有效） */
 const importCache = new Map();
 // ==================== AI 导入格式识别 ====================
@@ -1475,7 +1486,7 @@ function createRouter(user) {
       // 首次访问时创建 self 成员 + 属于用户的私有日常账本
       ensureSelfMember(user);
       const rows = db.prepare('SELECT key,value FROM setting').all();
-      const out = { currentLedgerId: null, hideAmount: false };
+      const out = { currentLedgerId: null, hideAmount: false, version: APP_VERSION };
       for (const r of rows) {
         if (r.key === 'current_ledger') out.currentLedgerId = r.value;
         else if (r.key === 'hide_amount') out.hideAmount = r.value === '1';
@@ -1557,6 +1568,12 @@ function createRouter(user) {
   };
 }
 
+/** 账户类型 → 中文名（与前端 AccountsView 的 TYPE_LABEL 保持一致；archived 同时是"已封存"状态） */
+const ACCOUNT_TYPE_LABEL = {
+  cash: '现金', savings: '储蓄卡', credit: '信用卡', online: '网络账户',
+  investment: '投资账户', stored: '储值卡', receivable: '应收应付', archived: '已封存',
+};
+
 // ==================== 导出 Excel ====================
 function exportToExcel(user) {
   const db = getDb();
@@ -1578,6 +1595,13 @@ function exportToExcel(user) {
   const incomeRows = [['日期', '分类', '子分类', '金额(元)', '账户', '成员', '消费平台', '备注']];
   const transferRows = [['日期', '转出账户', '转入账户', '金额(元)', '消费平台', '备注']];
 
+  // 本账本相关的账户 id（在本账本流水中出现过）
+  const accIds = new Set();
+  for (const e of rows) {
+    if (e.account_id) accIds.add(e.account_id);
+    if (e.to_account_id) accIds.add(e.to_account_id);
+  }
+
   for (const e of rows) {
     const date = e.entry_date || '';
     const amount = (e.amount / 100).toFixed(2);
@@ -1598,10 +1622,43 @@ function exportToExcel(user) {
     }
   }
 
+  // 账户 sheet：本账本相关账户 + 分类 + 状态（只含当前用户可见的账户）
+  const accRows = [['账户名称', '账户分类', '状态', '当前余额(元)', '可见性', '备注']];
+  let netTotal = 0;
+  if (accIds.size > 0) {
+    const ph = [...accIds].map(() => '?').join(',');
+    const accs = db.prepare(
+      `SELECT * FROM account WHERE id IN (${ph}) AND (is_private=0 OR owner_uid=?) ORDER BY sort, created_at`
+    ).all(...accIds, user.uid);
+    const bals = computeBalances();
+    for (const a of accs) {
+      const cur = (a.balance || 0) + (bals.get(a.id) || 0);
+      netTotal += cur;
+      accRows.push([
+        a.name || '',
+        ACCOUNT_TYPE_LABEL[a.type] || a.type || '',
+        a.type === 'archived' ? '已封存' : '正常',
+        (cur / 100).toFixed(2),
+        a.is_private ? '私人' : '共享',
+        a.note || '',
+      ]);
+    }
+    accRows.push(['合计（净资产）', '', '', (netTotal / 100).toFixed(2), '', '']);
+  }
+
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(expenseRows), '支出');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(incomeRows), '收入');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(transferRows), '转账');
+  const wsExpense = XLSX.utils.aoa_to_sheet(expenseRows);
+  const wsIncome = XLSX.utils.aoa_to_sheet(incomeRows);
+  const wsTransfer = XLSX.utils.aoa_to_sheet(transferRows);
+  const wsAccounts = XLSX.utils.aoa_to_sheet(accRows);
+  wsExpense['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 30 }];
+  wsIncome['!cols'] = wsExpense['!cols'];
+  wsTransfer['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 30 }];
+  wsAccounts['!cols'] = [{ wch: 18 }, { wch: 12 }, { wch: 8 }, { wch: 14 }, { wch: 8 }, { wch: 30 }];
+  XLSX.utils.book_append_sheet(wb, wsExpense, '支出');
+  XLSX.utils.book_append_sheet(wb, wsIncome, '收入');
+  XLSX.utils.book_append_sheet(wb, wsTransfer, '转账');
+  if (accRows.length > 1) XLSX.utils.book_append_sheet(wb, wsAccounts, '账户');
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
@@ -2061,7 +2118,7 @@ function startMcpServer() {
       try {
         let result;
         if (method === 'initialize') {
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'sinong', version: '1.2.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'sinong', version: APP_VERSION } };
         } else if (method === 'tools/list') {
           result = { tools: MCP_TOOLS };
         } else if (method === 'tools/call') {

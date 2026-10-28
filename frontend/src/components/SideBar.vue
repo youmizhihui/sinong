@@ -15,6 +15,8 @@ const NAV = [
   { name: 'settings', label: '设置', icon: SettingsIcon },
 ]
 const current = computed(() => route.name as string)
+/** 应用版本：后端从 manifest 读取，随 settings 下发 */
+const version = computed(() => store.settings.version ? `v${store.settings.version}` : '')
 
 function go(name: string) {
   if (current.value === name) return
@@ -50,7 +52,7 @@ function newEntry() {
       </button>
     </nav>
 
-    <div class="side-foot muted">司农记账 v1.1.1 · 数据仅存于本机</div>
+    <div class="side-foot muted">司农记账 {{ version }} · 数据仅存于本机</div>
   </aside>
 </template>
 

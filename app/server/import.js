@@ -468,8 +468,41 @@ function parseWorkbook(buffer, aiMapping) {
   const result = {
     expense: [], income: [], transfer: [],
     newCategories: new Map(), newAccounts: new Set(), newMembers: new Set(),
+    accountSheet: {}, // 账户sheet解析出的元信息：name → {type, status, visibility}
     warnings: [],
   };
+
+  // 先读"账户"sheet（如果有），拿到账户分类/状态/可见性
+  const accSheetName = wb.SheetNames.find((n) => n === '账户' || /account/i.test(n));
+  if (accSheetName) {
+    const ws = wb.Sheets[accSheetName];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    // 找表头行
+    let headerRow = -1;
+    for (let i = 0; i < Math.min(5, rows.length); i++) {
+      const row = rows[i] || [];
+      if (row.some((c) => String(c || '').includes('账户名称')) && row.some((c) => String(c || '').includes('账户分类'))) {
+        headerRow = i; break;
+      }
+    }
+    if (headerRow >= 0) {
+      const header = rows[headerRow];
+      const colName = header.findIndex((c) => String(c || '').includes('账户名称'));
+      const colType = header.findIndex((c) => String(c || '').includes('账户分类'));
+      const colStatus = header.findIndex((c) => String(c || '').includes('状态'));
+      const colVis = header.findIndex((c) => String(c || '').includes('可见性'));
+      for (let i = headerRow + 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || !row[colName]) continue;
+        const name = String(row[colName]).trim();
+        if (!name || name.includes('合计')) continue;
+        const typeLabel = colType >= 0 ? String(row[colType] || '').trim() : '';
+        const status = colStatus >= 0 ? String(row[colStatus] || '').trim() : '';
+        const visibility = colVis >= 0 ? String(row[colVis] || '').trim() : '';
+        result.accountSheet[name] = { typeLabel, status, visibility };
+      }
+    }
+  }
 
   // ---- AI 映射模式 ----
   if (aiMapping && Array.isArray(aiMapping.sheets)) {
@@ -678,19 +711,41 @@ function doImport(parsed, ledgerId, userUid) {
 
   // 自动创建缺失账户
   const accIdx = buildAccountIndex();
-  // 确保默认"现金"账户存在（导入记录账户为空时默认用现金）
+  // 判断当前账本类型，决定新建账户是共享还是私有
+  const ledger = db.prepare('SELECT type, owner_uid FROM ledger WHERE id=?').get(ledgerId);
+  const ledgerType = ledger?.type || 'shared';
+  const newAccountIsPrivate = ledgerType === 'private' ? 1 : 0;
+  const newAccountOwnerUid = ledgerType === 'private' ? userUid : null;
+
+  // 账户分类标签 → type 映射
+  const TYPE_LABEL_MAP = {
+    '现金': 'cash', '储蓄卡': 'savings', '信用卡': 'credit', '网络账户': 'online',
+    '投资账户': 'investment', '储值卡': 'stored', '应收应付': 'receivable', '已封存': 'archived',
+  };
+  // 从账户sheet拿到的元信息
+  const accMeta = parsed._parsed.accountSheet || {};
+
+  // 确保默认"现金"账户存在
   if (!accIdx['现金']) {
     const id = genId('acc');
-    db.prepare('INSERT INTO account (id,type,name,balance,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id, 'cash', '现金', 0, null, 0, now, now);
+    db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, 'cash', '现金', 0, newAccountIsPrivate, newAccountOwnerUid, null, 0, now, now);
     accIdx['现金'] = id;
   }
   for (const name of parsed.newAccounts) {
     if (!accIdx[name]) {
       const id = genId('acc');
-      const type = name === '借入借出' ? 'receivable' : 'cash';
-      db.prepare('INSERT INTO account (id,type,name,balance,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
-        .run(id, type, name, 0, null, 999, now, now);
+      // 优先用账户sheet里的分类，否则默认 cash；借入借出固定 receivable
+      let type = name === '借入借出' ? 'receivable' : 'cash';
+      const meta = accMeta[name];
+      if (meta && meta.typeLabel && TYPE_LABEL_MAP[meta.typeLabel]) {
+        type = TYPE_LABEL_MAP[meta.typeLabel];
+      }
+      // 状态是"已封存"则 type 强制为 archived
+      if (meta && meta.status === '已封存') type = 'archived';
+      // 可见性跟随账本类型：共享账本 → 共享账户；私人账本 → 私有账户（账户sheet的可见性列仅展示用，不参与判断）
+      db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(id, type, name, 0, newAccountIsPrivate, newAccountOwnerUid, null, 999, now, now);
       accIdx[name] = id;
     }
   }

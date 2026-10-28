@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { showConfirmDialog, showToast } from 'vant'
+import { showConfirmDialog, showToast, Switch as VanSwitch } from 'vant'
 import { api, type FnosUser } from '../api'
 import { store } from '../store'
 import { ArrowLeft, Plus, MoreHorizontal, Check, BookOpen, Luggage, Briefcase, Layers, Users, Lock, X } from 'lucide-vue-next'
@@ -191,8 +191,28 @@ function isMember(uid: string) {
 function isAdmin(uid: string) {
   return memberList.value.some((m) => (m.user_id === uid || m.user_id === '*') && m.perm === 'admin')
 }
+/** 是否开启"允许所有人访问"（ledger_share 中存在 '*' 记录） */
+const shareAll = computed(() => memberList.value.some((m) => m.user_id === '*'))
+async function toggleShareAll(v: boolean) {
+  if (!memberTarget.value) return
+  try {
+    if (v) {
+      await api.post(`ledgers/${memberTarget.value.id}/members`, { userId: '*', perm: 'rw' })
+      showToast('已允许所有人访问')
+    } else {
+      await api.del(`ledgers/${memberTarget.value.id}/members/*`)
+      showToast('已取消所有人访问')
+    }
+    const d = await api.get<{ members: LedgerMember[] }>(`ledgers/${memberTarget.value.id}/members`)
+    memberList.value = d.members
+    await load()
+  } catch (e) {
+    showToast((e as Error).message)
+  }
+}
 async function toggleMember(u: FnosUser) {
   if (!memberTarget.value) return
+  if (shareAll.value) return
   if (isAdmin(u.uid)) return
   if (isMember(u.uid)) {
     try {
@@ -321,12 +341,19 @@ async function toggleMember(u: FnosUser) {
         <button class="pop-close" @click="showMembers = false"><X :size="18" /></button>
       </div>
       <div class="form-body">
-        <div class="rel-label muted">勾选可访问此账本的飞牛用户（家人需先打开过一次司农记账才会出现在列表）</div>
-        <div v-if="fnosUsers.length" class="member-list">
+        <div class="shareall-row">
+          <div class="shareall-text">
+            <div class="shareall-title">允许所有人访问</div>
+            <div class="shareall-desc muted">所有飞牛用户打开司农记账即可见此账本，无需单独添加</div>
+          </div>
+          <van-switch :model-value="shareAll" size="22px" @update:model-value="toggleShareAll" />
+        </div>
+        <div class="rel-label muted">或勾选指定成员（家人需先打开过一次司农记账才会出现在列表）</div>
+        <div v-if="fnosUsers.length" class="member-list" :class="{ 'all-allowed': shareAll }">
           <div v-for="u in fnosUsers" :key="u.uid" class="member-row" :class="{ disabled: isAdmin(u.uid) }">
             <span class="member-id">{{ u.name || u.uid }}</span>
-            <span class="member-perm">{{ isAdmin(u.uid) ? '管理员' : isMember(u.uid) ? '可读写' : '未共享' }}</span>
-            <button v-if="!isAdmin(u.uid)" class="member-check" :class="{ on: isMember(u.uid) }" @click="toggleMember(u)">
+            <span class="member-perm">{{ shareAll ? '所有人可见' : isAdmin(u.uid) ? '管理员' : isMember(u.uid) ? '可读写' : '未共享' }}</span>
+            <button v-if="!isAdmin(u.uid)" class="member-check" :class="{ on: isMember(u.uid) }" :disabled="shareAll" @click="toggleMember(u)">
               <Check v-if="isMember(u.uid)" :size="14" />
             </button>
             <span v-else class="member-lock">管理员</span>
@@ -387,6 +414,15 @@ async function toggleMember(u: FnosUser) {
 .member-check.on { background: var(--brand); border-color: var(--brand); }
 .member-lock { font-size: 11px; color: var(--text2); }
 .member-row.disabled { opacity: 0.7; }
+.shareall-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px; margin-bottom: 14px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+}
+.shareall-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.shareall-desc { font-size: 12px; margin-top: 2px; }
+.member-list.all-allowed { opacity: 0.6; }
+.member-check:disabled { cursor: not-allowed; }
 .current-badge { color: var(--brand); display: flex; }
 .more-btn { padding: 6px; color: var(--text2); display: flex; }
 .tip { font-size: 12px; text-align: center; }
