@@ -98,9 +98,12 @@ cd frontend; npm run dev
 
 ## 当前版本
 
-**v1.2.2** - 预算层级重构（总预算 + 一级/二级分类子预算、金额上限校验、树形折叠展示）
+**v1.2.3** - 账期视图全面化（所有账户按月分组统计、可自定义账单日、账期翻页）+ 账期日期算法修复
 
-> 版本号唯一来源：项目根目录 `manifest` 的 `version=` 行。后端启动时读取注入 settings API 和 MCP serverInfo；前端侧栏版本从 settings 拿。改版本只改 manifest，其他地方自动跟随。
+> 版本号两处维护（真机进程读不到 manifest，运行时展示不依赖它）：
+> - 程序内唯一来源：`app/server/version.js` 的 VERSION（侧栏/settings API/MCP serverInfo 显示）
+> - 打包用：项目根目录 `manifest` 的 `version=` 行
+> 发版时两处都改，并同步更新 `CHANGELOG.md`。
 > 发新版时同步更新 `CHANGELOG.md`（完整更新日志，最新在最上）和 manifest 的 changelog 字段。
 
 ## 常见坑（踩过的坑，别再踩）

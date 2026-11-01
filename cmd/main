@@ -10,6 +10,8 @@ PID_FILE="${TRIM_PKGVAR}/sinong.pid"
 LOG_FILE="${TRIM_PKGVAR}/sinong.log"
 SOCKET_FILE="${APP_DEST}/app.sock"
 
+# 版本号说明：程序内版本显示由 app/server/version.js 提供（真机读不到 manifest，不在此读取）
+
 # 将 nodejs 运行时加入 PATH（多路径探测，兼容不同依赖命名/安装位置）
 NODE_BIN_DIR=""
 for cand in \

@@ -468,7 +468,7 @@ function parseWorkbook(buffer, aiMapping) {
   const result = {
     expense: [], income: [], transfer: [],
     newCategories: new Map(), newAccounts: new Set(), newMembers: new Set(),
-    accountSheet: {}, // 账户sheet解析出的元信息：name → {type, status, visibility}
+    accountSheet: {}, // 账户sheet解析出的元信息：name → {typeLabel, status, visibility, statementDay, statementDayIncluded}
     warnings: [],
   };
 
@@ -491,6 +491,8 @@ function parseWorkbook(buffer, aiMapping) {
       const colType = header.findIndex((c) => String(c || '').includes('账户分类'));
       const colStatus = header.findIndex((c) => String(c || '').includes('状态'));
       const colVis = header.findIndex((c) => String(c || '').includes('可见性'));
+      const colStmt = header.findIndex((c) => String(c || '').includes('账单日'));
+      const colStmtIn = header.findIndex((c) => String(c || '').includes('计入'));
       for (let i = headerRow + 1; i < rows.length; i++) {
         const row = rows[i];
         if (!row || !row[colName]) continue;
@@ -499,7 +501,18 @@ function parseWorkbook(buffer, aiMapping) {
         const typeLabel = colType >= 0 ? String(row[colType] || '').trim() : '';
         const status = colStatus >= 0 ? String(row[colStatus] || '').trim() : '';
         const visibility = colVis >= 0 ? String(row[colVis] || '').trim() : '';
-        result.accountSheet[name] = { typeLabel, status, visibility };
+        // 账单日（信用卡）：取列中的数字部分
+        let statementDay = null;
+        let statementDayIncluded = false;
+        if (colStmt >= 0) {
+          const m = /(\d+)/.exec(String(row[colStmt] || ''));
+          if (m) {
+            const d = Number(m[1]);
+            if (d >= 1 && d <= 31) statementDay = d;
+          }
+          if (statementDay && colStmtIn >= 0 && String(row[colStmtIn] || '').trim() === '是') statementDayIncluded = true;
+        }
+        result.accountSheet[name] = { typeLabel, status, visibility, statementDay, statementDayIncluded };
       }
     }
   }
@@ -728,8 +741,8 @@ function doImport(parsed, ledgerId, userUid) {
   // 确保默认"现金"账户存在
   if (!accIdx['现金']) {
     const id = genId('acc');
-    db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(id, 'cash', '现金', 0, newAccountIsPrivate, newAccountOwnerUid, null, 0, now, now);
+    db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,statement_day,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, 'cash', '现金', 0, newAccountIsPrivate, newAccountOwnerUid, null, 0, 1, now, now);
     accIdx['现金'] = id;
   }
   for (const name of parsed.newAccounts) {
@@ -744,8 +757,12 @@ function doImport(parsed, ledgerId, userUid) {
       // 状态是"已封存"则 type 强制为 archived
       if (meta && meta.status === '已封存') type = 'archived';
       // 可见性跟随账本类型：共享账本 → 共享账户；私人账本 → 私有账户（账户sheet的可见性列仅展示用，不参与判断）
-      db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-        .run(id, type, name, 0, newAccountIsPrivate, newAccountOwnerUid, null, 999, now, now);
+      // 账单日：所有账户通用，从账户sheet还原，缺省 1 号（= 自然月）
+      const sd = (meta && Number.isInteger(meta.statementDay) && meta.statementDay >= 1 && meta.statementDay <= 31)
+        ? meta.statementDay : 1;
+      const sdi = meta && meta.statementDayIncluded ? 1 : 0;
+      db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,statement_day,statement_day_included,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, type, name, 0, newAccountIsPrivate, newAccountOwnerUid, null, 999, sd, sdi, now, now);
       accIdx[name] = id;
     }
   }

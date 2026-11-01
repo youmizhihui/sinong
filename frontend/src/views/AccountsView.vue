@@ -11,7 +11,7 @@ const data = ref<AccountsData | null>(null)
 const loading = ref(true)
 const collapsed = ref<Record<string, boolean>>({})
 const showForm = ref(false)
-const form = ref({ type: 'cash', name: '', balance: '', isPrivate: false })
+const form = ref({ type: 'cash', name: '', balance: '', isPrivate: false, statementDay: 1, statementDayIncluded: false })
 const showTop = ref(false)
 
 const TYPE_LABEL: Record<string, string> = {
@@ -62,9 +62,11 @@ async function create() {
     name: form.value.name.trim(),
     balance: Number.isFinite(balance) ? balance : 0,
     isPrivate: form.value.isPrivate,
+    statementDay: form.value.statementDay || 1,
+    statementDayIncluded: form.value.statementDay > 1 ? form.value.statementDayIncluded : false,
   })
   showForm.value = false
-  form.value = { type: 'cash', name: '', balance: '', isPrivate: false }
+  form.value = { type: 'cash', name: '', balance: '', isPrivate: false, statementDay: 1, statementDayIncluded: false }
   await load()
 }
 
@@ -152,6 +154,20 @@ onActivated(load)
         </div>
         <input v-model="form.name" class="field" placeholder="账户名称（必填）" />
         <input v-model="form.balance" class="field" type="number" placeholder="初始余额（元，默认 0，可负）" />
+        <div class="credit-box">
+          <div class="credit-row">
+            <span class="credit-label">账单日</span>
+            <select v-model.number="form.statementDay" class="field day-select">
+              <option v-for="d in 31" :key="d" :value="d">{{ d }} 日</option>
+            </select>
+          </div>
+          <label v-if="form.statementDay > 1" class="privacy-row">
+            <input v-model="form.statementDayIncluded" type="checkbox" />
+            <span>账单日消费计入本期账单</span>
+            <small>默认不计入，归入下一期</small>
+          </label>
+          <div class="credit-tip">账期按月分组：1 号即自然月；设为其他日期则按账单周期划分</div>
+        </div>
         <label class="privacy-row">
           <input v-model="form.isPrivate" type="checkbox" />
           <span>私有账户</span>
@@ -241,6 +257,11 @@ onActivated(load)
   font-size: 13px; cursor: pointer;
 }
 .privacy-row small { color: var(--text2); font-size: 11px; margin-left: 4px; }
+.credit-box { display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px dashed var(--border); border-radius: 10px; }
+.credit-row { display: flex; align-items: center; gap: 10px; }
+.credit-label { font-size: 13px; white-space: nowrap; }
+.day-select { flex: 1; padding: 8px 10px; }
+.credit-tip { font-size: 11px; color: var(--text2); line-height: 1.5; }
 .sheet-actions { display: flex; gap: 10px; }
 .btn {
   flex: 1; padding: 12px; border-radius: 10px;

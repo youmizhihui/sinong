@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS account (
   owner_uid  TEXT,
   note       TEXT,
   sort       INTEGER NOT NULL DEFAULT 0,
+  statement_day INTEGER,
+  statement_day_included INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -258,6 +260,14 @@ function migrate() {
   if (!accCols.some((c) => c.name === 'owner_uid')) {
     db.exec('ALTER TABLE account ADD COLUMN owner_uid TEXT');
   }
+  if (!accCols.some((c) => c.name === 'statement_day')) {
+    db.exec('ALTER TABLE account ADD COLUMN statement_day INTEGER');
+  }
+  if (!accCols.some((c) => c.name === 'statement_day_included')) {
+    db.exec('ALTER TABLE account ADD COLUMN statement_day_included INTEGER NOT NULL DEFAULT 0');
+  }
+  // 所有账户统一按账期分组：账单日缺省按 1 号（= 自然月）
+  db.exec('UPDATE account SET statement_day = 1 WHERE statement_day IS NULL OR statement_day < 1 OR statement_day > 31');
   // 历史导入残留的负金额修正：系统约定 amount 恒为正，方向由 flow_type 决定
   db.exec('UPDATE entry SET amount = ABS(amount) WHERE amount < 0');
   // 默认消费平台种子（表空时才插入，用户自定义后不再覆盖）
@@ -326,8 +336,8 @@ function seedDefaultAccount() {
   if (row.n === 0) {
     const now = new Date().toISOString();
     db.prepare(
-      'INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
-    ).run(genId('acc'), 'cash', '现金', 0, 0, null, null, 0, now, now);
+      'INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,statement_day,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(genId('acc'), 'cash', '现金', 0, 0, null, null, 0, 1, now, now);
   }
 }
 

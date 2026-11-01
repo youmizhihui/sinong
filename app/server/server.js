@@ -17,16 +17,8 @@ const { initDb, getDb, genId, touchUser, getUsers } = require('./db');
 const { parseWorkbook, doImport, extractWorkbookStructure } = require('./import');
 const XLSX = require('xlsx');
 
-/** 应用版本：唯一来源是项目根目录的 manifest（version= 行），启动时读取一次 */
-const APP_VERSION = (() => {
-  try {
-    const manifestPath = process.env.TRIM_APPDEST
-      ? path.join(process.env.TRIM_APPDEST, 'manifest')
-      : path.join(__dirname, '..', '..', 'manifest');
-    const m = /^version=(.+)$/m.exec(fs.readFileSync(manifestPath, 'utf-8'));
-    return m ? m[1].trim() : 'unknown';
-  } catch { return 'unknown'; }
-})();
+/** 应用版本号：程序内唯一来源为 ./version.js（真机读不到 manifest，见 version.js 注释） */
+const APP_VERSION = require('./version').VERSION;
 
 /** 导入预览缓存：token → 解析结果（5分钟有效） */
 const importCache = new Map();
@@ -408,6 +400,22 @@ function computeBalances() {
     else if (e.flow_type === 'transfer') { add(e.account_id, -e.amount); add(e.to_account_id, e.amount); }
   }
   return bal;
+}
+
+/** 某年某月的天数（m 为 1-12） */
+function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
+
+/** 某年某月的账单日（31 号在小月顺延到月末），返回 YYYY-MM-DD */
+function stmtDateStr(y, m, day) {
+  const d = Math.min(day, daysInMonth(y, m));
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+/** YYYY-MM-DD 加减天数（自动跨月跨年） */
+function addDaysStr(dateStr, n) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + n));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
 /** 成员 self 懒创建：当前用户自动映射成员；用户无账本时自动创建私有日常账本 */
@@ -828,13 +836,16 @@ function createRouter(user) {
     },
     'POST /api/accounts': async (body, _p, req) => {
       const user = getUser(req);
-      const { type, name, balance, note, isPrivate } = body;
+      const { type, name, balance, note, isPrivate, statementDay, statementDayIncluded } = body;
       if (!type || !name) throw httpError(400, '类型与名称必填');
       const id = genId('acc');
       const now = nowIso();
       const isPrivateVal = isPrivate ? 1 : 0;
-      db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-        .run(id, type, name, Number.isInteger(balance) ? balance : 0, isPrivateVal, user.uid, note || null, 0, now, now);
+      // 账单日（1-31）：所有账户通用，默认 1 号（= 自然月）
+      const sd = (Number.isInteger(statementDay) && statementDay >= 1 && statementDay <= 31) ? statementDay : 1;
+      const sdi = statementDayIncluded ? 1 : 0;
+      db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,statement_day,statement_day_included,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, type, name, Number.isInteger(balance) ? balance : 0, isPrivateVal, user.uid, note || null, 0, sd, sdi, now, now);
       return db.prepare('SELECT * FROM account WHERE id=?').get(id);
     },
     'GET /api/accounts/:id': (_b, p) => {
@@ -855,6 +866,78 @@ function createRouter(user) {
       }
       return { ...a, currentBalance, statIncome: income, statExpense: expense };
     },
+    // 账期聚合：服务端按期统计，避免前端分页导致某期数字不全
+    'GET /api/accounts/:id/cycles': (_b, p, req) => {
+      const user = getUser(req);
+      const u = new URL(req.url, 'http://x');
+      let ledgerId = u.searchParams.get('ledgerId');
+      if (!ledgerId) ledgerId = db.prepare("SELECT value FROM setting WHERE key='current_ledger'").get()?.value;
+      if (ledgerId) requireLedgerAccess(user.uid, ledgerId);
+      const a = db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
+      if (!a) throw httpError(404, '账户不存在');
+      const stmtDay = (a.statement_day >= 1 && a.statement_day <= 31) ? a.statement_day : 1;
+      const included = !!a.statement_day_included;
+      // 分页：limit + before（游标 = 已加载最早一期的 key，取更早的账期）
+      const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '12', 10) || 12, 1), 240);
+      const before = (u.searchParams.get('before') || '').trim();
+
+      const where = ['(account_id=? OR to_account_id=?)'];
+      const vals = [p.id, p.id];
+      if (ledgerId) { where.push('ledger_id=?'); vals.push(ledgerId); }
+
+      // 归属期 key（该期账单日所在月）：
+      //   账单日 1 号 = 自然月；否则日 <=(<) 当月实际账单日 归本期，其余归下月期
+      //   当月实际账单日 = min(账单日, 当月天数)，31 号在小月自动顺延到月末，账期首尾相接不留缝
+      const dayOf = "CAST(strftime('%d', substr(entry_date,1,10)) AS INTEGER)";
+      const lastDayOf = "CAST(strftime('%d', date(substr(entry_date,1,10),'start of month','+1 month','-1 day')) AS INTEGER)";
+      const keyExpr = stmtDay === 1
+        ? "substr(entry_date,1,7)"
+        : `CASE WHEN ${dayOf} ${included ? '<=' : '<'} MIN(${stmtDay}, ${lastDayOf})
+                THEN substr(entry_date,1,7)
+                ELSE strftime('%Y-%m', date(substr(entry_date,1,10), 'start of month', '+1 month')) END`;
+
+      const agg = db.prepare(`
+        SELECT ${keyExpr} AS cyc,
+          COALESCE(SUM(CASE WHEN flow_type='expense' OR (flow_type='transfer' AND account_id=?) THEN amount ELSE 0 END), 0) AS expense,
+          COALESCE(SUM(CASE WHEN flow_type='income' OR flow_type='refund' OR (flow_type='transfer' AND to_account_id=?) THEN amount ELSE 0 END), 0) AS income,
+          COUNT(*) AS count
+        FROM entry WHERE ${where.join(' AND ')}
+        GROUP BY cyc ORDER BY cyc DESC
+      `).all(p.id, p.id, ...vals);
+
+      const currentBalance = (a.balance || 0) + (computeBalances().get(a.id) || 0);
+      // 先把全部账期算出期初/期末（期末余额由当前余额倒推），再按游标分页，
+      // 这样任意一页的期初/期末都与整体一致
+      let running = currentBalance;
+      const allRows = agg.map((r) => {
+        const net = r.income - r.expense;
+        const close = running;
+        const open = close - net;
+        running = open;
+        const [y, m] = r.cyc.split('-').map(Number);
+        let start, end;
+        if (stmtDay === 1) {
+          start = `${r.cyc}-01`;
+          end = `${r.cyc}-${String(daysInMonth(y, m)).padStart(2, '0')}`;
+        } else {
+          const py = m === 1 ? y - 1 : y, pm = m === 1 ? 12 : m - 1;
+          const thisStmt = stmtDateStr(y, m, stmtDay);
+          const prevStmt = stmtDateStr(py, pm, stmtDay);
+          // 账单日当天计入本期 → 起点为上次账单日次日；不计入 → 起点就是上次账单日
+          start = addDaysStr(prevStmt, included ? 1 : 0);
+          end = addDaysStr(thisStmt, included ? 0 : -1);
+        }
+        return { key: r.cyc, start, end, income: r.income, expense: r.expense, open, close, count: r.count };
+      });
+
+      // agg 已按 cyc DESC 排序；before 表示只看比它更早的账期
+      const from = before ? allRows.findIndex((r) => r.key < before) : 0;
+      const begin = from < 0 ? allRows.length : from;
+      const rows = allRows.slice(begin, begin + limit);
+      const hasMore = begin + limit < allRows.length;
+
+      return { statementDay: stmtDay, included, currentBalance, cycles: rows, hasMore };
+    },
     'PUT /api/accounts/:id': async (body, p) => {
       const a = db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
       if (!a) throw httpError(404, '账户不存在');
@@ -865,6 +948,15 @@ function createRouter(user) {
       if (body.balance !== undefined && Number.isInteger(body.balance)) { fields.push('balance=?'); vals.push(body.balance); }
       if (body.isPrivate !== undefined) {
         fields.push('is_private=?'); vals.push(body.isPrivate ? 1 : 0);
+      }
+      if (body.statementDay !== undefined) {
+        // 账单日（1-31）：所有账户通用，非法值回落到 1 号
+        const sd = (Number.isInteger(body.statementDay) && body.statementDay >= 1 && body.statementDay <= 31)
+          ? body.statementDay : 1;
+        fields.push('statement_day=?'); vals.push(sd);
+      }
+      if (body.statementDayIncluded !== undefined) {
+        fields.push('statement_day_included=?'); vals.push(body.statementDayIncluded ? 1 : 0);
       }
       if (!fields.length) return db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
       fields.push('updated_at=?'); vals.push(nowIso()); vals.push(p.id);
@@ -1710,7 +1802,7 @@ function exportToExcel(user) {
   }
 
   // 账户 sheet：本账本相关账户 + 分类 + 状态（只含当前用户可见的账户）
-  const accRows = [['账户名称', '账户分类', '状态', '当前余额(元)', '可见性', '备注']];
+  const accRows = [['账户名称', '账户分类', '状态', '当前余额(元)', '可见性', '账单日', '账单日计入本期', '备注']];
   let netTotal = 0;
   if (accIds.size > 0) {
     const ph = [...accIds].map(() => '?').join(',');
@@ -1727,10 +1819,12 @@ function exportToExcel(user) {
         a.type === 'archived' ? '已封存' : '正常',
         (cur / 100).toFixed(2),
         a.is_private ? '私人' : '共享',
+        a.statement_day ? `${a.statement_day}日` : '',
+        a.statement_day ? (a.statement_day_included ? '是' : '否') : '',
         a.note || '',
       ]);
     }
-    accRows.push(['合计（净资产）', '', '', (netTotal / 100).toFixed(2), '', '']);
+    accRows.push(['合计（净资产）', '', '', (netTotal / 100).toFixed(2), '', '', '', '']);
   }
 
   const wb = XLSX.utils.book_new();
@@ -1741,7 +1835,7 @@ function exportToExcel(user) {
   wsExpense['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 30 }];
   wsIncome['!cols'] = wsExpense['!cols'];
   wsTransfer['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 30 }];
-  wsAccounts['!cols'] = [{ wch: 18 }, { wch: 12 }, { wch: 8 }, { wch: 14 }, { wch: 8 }, { wch: 30 }];
+  wsAccounts['!cols'] = [{ wch: 18 }, { wch: 12 }, { wch: 8 }, { wch: 14 }, { wch: 8 }, { wch: 10 }, { wch: 14 }, { wch: 30 }];
   XLSX.utils.book_append_sheet(wb, wsExpense, '支出');
   XLSX.utils.book_append_sheet(wb, wsIncome, '收入');
   XLSX.utils.book_append_sheet(wb, wsTransfer, '转账');
