@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showToast, showConfirmDialog, DatePicker as VanDatePicker, TimePicker as VanTimePicker, PickerGroup as VanPickerGroup } from 'vant'
 import { api, type Account, type Category, type AccountsData, type Entry, type Member, type Attachment, type PlatformItem } from '../api'
@@ -68,20 +68,27 @@ const amount = computed(() => {
 })
 
 // 过滤非法字符（桌面手动输入时）
+/** 程序自动填充（应用识别结果）期间不把字段记成「用户手动改过」 */
+let autoFilling = false
 watch(amountText, (v) => {
-  if (v) amountTouched.value = true
+  if (v && !autoFilling) amountTouched.value = true
   if (/[^\d.]/.test(v)) amountText.value = v.replace(/[^\d.]/g, '')
 })
 
 // 分类
 const catGroups = computed(() => cats.value.filter((c) => !c.parent_id))
-const currentCat = computed(() =>
-  cats.value.flatMap((g) => g.children || []).find((c) => c.id === categoryId.value),
-)
+const currentCat = computed(() => {
+  // 含一级分类：极端情况（一级分类下没有二级）也能显示分类名，而不是「选择分类」
+  const all = cats.value.flatMap((g) => [g, ...(g.children || [])])
+  return all.find((c) => c.id === categoryId.value)
+})
 const currentCatName = computed(() => currentCat.value?.name || '')
 const currentCatIcon = computed(() => {
+  const c = currentCat.value
+  if (!c) return undefined
+  if (!c.parent_id) return { ...c, parentIcon: c.icon }
   const g = cats.value.find((x) => x.id === activeGroup.value)
-  return currentCat.value ? { ...currentCat.value, parentIcon: g?.icon } : undefined
+  return { ...c, parentIcon: g?.icon }
 })
 // 常用分类：常用（is_frequent）优先，其余补齐，全部展示（网格内滚动）
 const quickCats = computed(() => {
@@ -178,6 +185,8 @@ function switchFlow(t: 'expense' | 'income' | 'transfer') {
   categoryId.value = ''
   activeGroup.value = ''
   reimbursable.value = false
+  // 切类型后分类已被重置为默认项，不算用户手动选过
+  catTouched.value = false
   if (t !== 'transfer') loadCats(t)
 }
 
@@ -188,20 +197,32 @@ async function loadCats(t: 'expense' | 'income') {
   activeTab.value = 'frequent'
   // 默认选中第一个二级分类（支出=早餐，收入=首项），实现快速记账
   const kids = catData.groups.flatMap((g) => g.children || [])
+  // 已有分类可能是一级（历史数据/MCP 写入）：先落到其第一个二级，别被下面的兜底换成一号分类
+  if (categoryId.value) categoryId.value = normalizeCatId(categoryId.value)
   if (kids.length && !kids.some((k) => k.id === categoryId.value)) {
     categoryId.value = kids[0].id
   }
 }
 
+/** 用户点选分类（算「手动改过」，后续识别不再覆盖） */
 function pickCategory(id: string) {
   catTouched.value = true
-  categoryId.value = id
-  const g = cats.value.find((c) => c.id === id)
-  if (g && g.children) activeGroup.value = g.id
-  else {
-    const parent = cats.value.find((c) => c.children?.some((x) => x.id === id))
-    if (parent) activeGroup.value = parent.id
-  }
+  setCategory(id)
+}
+/** 一级分类 id → 其第一个二级分类（流水只记在二级上）；已是二级或找不到则原样返回 */
+function normalizeCatId(id: string): string {
+  const top = cats.value.find((c) => c.id === id)
+  if (top && !top.parent_id && top.children?.length) return top.children[0].id
+  return id
+}
+/** 写入分类但不标记手动（程序应用识别结果时用）；一级自动落到第一个二级 */
+function setCategory(id: string) {
+  const cid = normalizeCatId(id)
+  categoryId.value = cid
+  const g = cats.value.find((c) => c.id === cid)
+  if (g) { activeGroup.value = g.id; return }
+  const parent = cats.value.find((c) => c.children?.some((x) => x.id === cid))
+  if (parent) activeGroup.value = parent.id
 }
 
 function openAccPicker(target: 'from' | 'to') {
@@ -328,12 +349,14 @@ async function aiRecognize() {
 function applySuggestion() {
   const s = suggestion.value
   if (!s) return
+  // 程序填充期间不算「用户手动改」，否则应用一次之后 touched 就恒为 true，第二次识别再也填不进去
+  autoFilling = true
   if (s.amount && !amountTouched.value) amountText.value = (s.amount / 100).toString()
   if (s.categoryId && !catTouched.value && flowType.value === 'expense') {
-    pickCategory(s.categoryId)
-    // 切到该分类所属的一级 tab，让选中项在分类网格里可见（否则停在"常用"看不到高亮）
-    const parent = cats.value.find((c) => c.id === s.categoryId)
-      || cats.value.find((c) => c.children?.some((x) => x.id === s.categoryId))
+    // 只识别到一级分类时，setCategory 会自动落到它下面第一个二级，避免记在一级分类上
+    setCategory(s.categoryId)
+    // 切到该分类所属的一级 tab，让选中项在分类网格里可见（否则停在「常用」看不到高亮）
+    const parent = cats.value.find((g) => g.id === categoryId.value || (g.children || []).some((x) => x.id === categoryId.value))
     if (parent) activeTab.value = parent.id
   }
   if (s.entryDate && !dateTouched.value) {
@@ -343,6 +366,7 @@ function applySuggestion() {
     entryDate.value = new Date(Y, M - 1, D, h || 0, mi || 0, se || 0)
   }
   suggestion.value = null
+  nextTick(() => { autoFilling = false })
 }
 
 function pickImages() {
@@ -403,6 +427,10 @@ function resetForm() {
   existing.value = []
   for (const img of images.value) URL.revokeObjectURL(img.url)
   images.value = []
+  // 新的一笔视为全新表单，识别结果可以正常填入
+  amountTouched.value = false
+  catTouched.value = false
+  dateTouched.value = false
 }
 
 async function doSave(resetRelations: boolean, keepEditing: boolean) {
@@ -413,7 +441,7 @@ async function doSave(resetRelations: boolean, keepEditing: boolean) {
     toAccountId: flowType.value === 'transfer' ? toAccountId.value : undefined,
     flowType: flowType.value,
     amount: amount.value,
-    categoryId: flowType.value === 'transfer' ? undefined : categoryId.value || undefined,
+    categoryId: flowType.value === 'transfer' ? undefined : (categoryId.value ? normalizeCatId(categoryId.value) : undefined),
     note: note.value.trim(),
     entryDate: fmtEntryDate(entryDate.value),
     reimbursable: flowType.value === 'expense' ? reimbursable.value : undefined,
