@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: 'SettingsView' })
-import { Settings as SettingsIcon, Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag, Plug, Copy, RefreshCw } from 'lucide-vue-next'
+import { Settings as SettingsIcon, Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag, Plug, Copy, RefreshCw, MessageCircle } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ref } from 'vue'
 import { api, type ImportPreview, type AiConfig } from '../api'
@@ -8,6 +8,10 @@ import { store } from '../store'
 import { showToast, showConfirmDialog, Switch as VanSwitch } from 'vant'
 
 const router = useRouter()
+const FEEDBACK_URL = 'https://feedback.youmizhihui.com/'
+function openFeedback() {
+  window.open(FEEDBACK_URL, '_blank')
+}
 const saving = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const importing = ref(false)
@@ -362,6 +366,14 @@ async function confirmImport() {
         <div class="row-main">
           <div class="row-title">MCP 接入</div>
           <div class="muted">让 AI 助手（ClawBot 等）远程记账</div>
+        </div>
+        <span class="muted">›</span>
+      </div>
+      <div class="row" style="cursor: pointer; border-top: 1px solid var(--border);" @click="openFeedback">
+        <span class="icon-badge"><MessageCircle :size="18" /></span>
+        <div class="row-main">
+          <div class="row-title">意见反馈</div>
+          <div class="muted">提建议或报告问题，浏览器新标签页打开</div>
         </div>
         <span class="muted">›</span>
       </div>

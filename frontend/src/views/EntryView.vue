@@ -7,7 +7,7 @@ import { iconForCat } from '../catIcons'
 import { store, fmtMoney } from '../store'
 import {
   ArrowLeft, ArrowRight, Utensils, Check,
-  CalendarDays, Wallet, Delete, X, Camera, BadgeCheck, User, ShoppingBag, Star,
+  CalendarDays, Wallet, Delete, X, Camera, BadgeCheck, User, ShoppingBag, Star, Sparkles,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -69,6 +69,7 @@ const amount = computed(() => {
 
 // 过滤非法字符（桌面手动输入时）
 watch(amountText, (v) => {
+  if (v) amountTouched.value = true
   if (/[^\d.]/.test(v)) amountText.value = v.replace(/[^\d.]/g, '')
 })
 
@@ -143,6 +144,7 @@ function openDatePicker() {
   showDate.value = true
 }
 function confirmGroup() {
+  dateTouched.value = true
   const [hh, mm] = groupTimeValue.value
   const [y, mo, dd] = groupDateValue.value
   entryDate.value = new Date(Number(y), Number(mo) - 1, Number(dd), Number(hh), Number(mm))
@@ -192,6 +194,7 @@ async function loadCats(t: 'expense' | 'income') {
 }
 
 function pickCategory(id: string) {
+  catTouched.value = true
   categoryId.value = id
   const g = cats.value.find((c) => c.id === id)
   if (g && g.children) activeGroup.value = g.id
@@ -231,10 +234,115 @@ function appendNum(d: string) {
     const dec = cur.split('.')[1]
     if (dec.length >= 2) return            // 最多两位小数
   }
+  amountTouched.value = true
   amountText.value = cur + d
 }
 function backspace() {
+  amountTouched.value = true
   amountText.value = amountText.value.slice(0, -1)
+}
+
+// ==================== 备注智能识别 ====================
+/** 用户是否手动操作过金额/分类/时间（识别结果只填没动过的字段） */
+const amountTouched = ref(false)
+const catTouched = ref(false)
+const dateTouched = ref(false)
+
+interface SmartSuggestion {
+  amount: number | null
+  categoryId: string | null
+  categoryName: string | null
+  entryDate: string
+  confidence: number
+  trace: string[]
+  source?: string
+}
+const suggestion = ref<SmartSuggestion | null>(null)
+const smartLoading = ref(false)
+const aiLoading = ref(false)
+let smartTimer: ReturnType<typeof setTimeout> | null = null
+
+function dateBrief(dt: string) {
+  // 'YYYY-MM-DD HH:MM:SS' → 「今天 08:05」/「10月28日 12:30」
+  const [d, t] = dt.split(' ')
+  const [, M, D] = d.split('-').map(Number)
+  const hm = (t || '').slice(0, 5)
+  const now = new Date()
+  const same = (s: string) => {
+    const [y, m, dd] = s.split('-').map(Number)
+    return y === now.getFullYear() && m === now.getMonth() + 1 && dd === now.getDate()
+  }
+  const y = new Date(now); y.setDate(y.getDate() - 1)
+  const [yy, ym, yd] = [y.getFullYear(), y.getMonth() + 1, y.getDate()]
+  if (same(d)) return `今天 ${hm}`
+  if (yy === Number(d.slice(0, 4)) && ym === M && yd === D) return `昨天 ${hm}`
+  return `${M}月${D}日 ${hm}`
+}
+const suggestionText = computed(() => {
+  const s = suggestion.value
+  if (!s) return ''
+  const parts: string[] = []
+  if (s.amount) parts.push(`¥${(s.amount / 100).toFixed(2)}`)
+  if (s.categoryName) parts.push(s.categoryName)
+  if (s.entryDate) parts.push(dateBrief(s.entryDate))
+  return parts.join(' · ')
+})
+
+/** 本地规则实时解析（防抖 400ms；仅支出 + 非编辑模式） */
+function scheduleSmartParse() {
+  if (smartTimer) clearTimeout(smartTimer)
+  if (!note.value.trim() || editingId.value || flowType.value !== 'expense') {
+    suggestion.value = null
+    return
+  }
+  smartTimer = setTimeout(async () => {
+    const text = note.value.trim()
+    smartLoading.value = true
+    try {
+      const r = await api.post<SmartSuggestion>('smart-parse', { text })
+      // 输入已变化则丢弃过期结果
+      if (note.value.trim() === text && (r.amount || r.categoryId)) suggestion.value = r
+    } catch { /* 本地识别失败静默 */ }
+    smartLoading.value = false
+  }, 400)
+}
+watch(note, scheduleSmartParse)
+watch(flowType, () => { suggestion.value = null; scheduleSmartParse() })
+
+/** AI 识别（始终可用，本地没认出来或识别得不对时用） */
+async function aiRecognize() {
+  const text = note.value.trim()
+  if (!text) { showToast('先输入备注内容'); return }
+  if (aiLoading.value) return
+  aiLoading.value = true
+  try {
+    const r = await api.post<SmartSuggestion>('smart-parse/ai', { text })
+    suggestion.value = { ...r, source: 'ai' }
+  } catch (e) {
+    showToast((e as Error).message)
+  }
+  aiLoading.value = false
+}
+
+/** 应用识别结果：只填用户没手动动过的字段 */
+function applySuggestion() {
+  const s = suggestion.value
+  if (!s) return
+  if (s.amount && !amountTouched.value) amountText.value = (s.amount / 100).toString()
+  if (s.categoryId && !catTouched.value && flowType.value === 'expense') {
+    pickCategory(s.categoryId)
+    // 切到该分类所属的一级 tab，让选中项在分类网格里可见（否则停在"常用"看不到高亮）
+    const parent = cats.value.find((c) => c.id === s.categoryId)
+      || cats.value.find((c) => c.children?.some((x) => x.id === s.categoryId))
+    if (parent) activeTab.value = parent.id
+  }
+  if (s.entryDate && !dateTouched.value) {
+    const [d, t] = s.entryDate.split(' ')
+    const [Y, M, D] = d.split('-').map(Number)
+    const [h, mi, se] = (t || '').split(':').map(Number)
+    entryDate.value = new Date(Y, M - 1, D, h || 0, mi || 0, se || 0)
+  }
+  suggestion.value = null
 }
 
 function pickImages() {
@@ -485,9 +593,23 @@ onMounted(async () => {
       </div>
     </template>
 
-    <!-- 备注 -->
+    <!-- 备注 + AI 识别 -->
     <div class="note-row">
-      <input v-model="note" placeholder="备注（可选）" />
+      <input v-model="note" placeholder="备注（可选），如：早上8点包子5" />
+      <button
+        class="ai-btn" :class="{ loading: aiLoading }"
+        :disabled="aiLoading || !note.trim()"
+        title="AI 识别备注内容"
+        @click="aiRecognize"
+      ><Sparkles :size="15" /></button>
+    </div>
+
+    <!-- 识别建议条（本地实时 / AI，应用时只填没手动动过的字段） -->
+    <div v-if="suggestion && suggestionText" class="smart-bar" :class="{ low: suggestion.confidence < 0.5 }">
+      <Sparkles v-if="suggestion.source === 'ai'" :size="13" class="smart-ico" />
+      <span class="smart-text">{{ suggestionText }}<i v-if="suggestion.confidence < 0.5" class="muted">（把握不大）</i></span>
+      <button class="smart-apply" @click="applySuggestion"><Check :size="13" /> 应用</button>
+      <button class="smart-close" @click="suggestion = null"><X :size="13" /></button>
     </div>
 
     <!-- 时间 + 账户 + 拍照（一行） -->
@@ -699,8 +821,30 @@ onMounted(async () => {
 .q-icon { display: flex; }
 
 /* 备注 */
-.note-row { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
-.note-row input { width: 100%; background: transparent; font-size: 14px; color: var(--text); }
+.note-row { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }
+.note-row input { flex: 1; width: auto; min-width: 0; background: transparent; font-size: 14px; color: var(--text); }
+.ai-btn {
+  flex: none; width: 30px; height: 30px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--brand); background: var(--brand-soft); border: none; cursor: pointer;
+}
+.ai-btn:disabled { opacity: 0.4; cursor: default; }
+.ai-btn.loading { animation: ai-pulse 1s ease-in-out infinite; }
+@keyframes ai-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.smart-bar {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  background: var(--brand-soft); border: 1px solid var(--brand); border-radius: 10px;
+  padding: 7px 10px; font-size: 12px; color: var(--text);
+}
+.smart-bar.low { background: var(--card); border-color: var(--border); }
+.smart-ico { color: var(--brand); flex: none; }
+.smart-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.smart-apply {
+  flex: none; display: flex; align-items: center; gap: 3px;
+  background: var(--brand); color: #fff; border: none; border-radius: 8px;
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.smart-close { flex: none; background: transparent; border: none; color: var(--text2); cursor: pointer; display: flex; align-items: center; padding: 2px; }
 
 /* 时间/账户 chips */
 .acc-row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }

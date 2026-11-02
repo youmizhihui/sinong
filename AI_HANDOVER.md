@@ -98,7 +98,7 @@ cd frontend; npm run dev
 
 ## 当前版本
 
-**v1.2.3** - 账期视图全面化（所有账户按月分组统计、可自定义账单日、账期翻页）+ 账期日期算法修复
+**v1.2.4** - 智能识别二级分类（内置关键词规则表）、应用识别结果后分类高亮修复、设置页反馈入口
 
 > 版本号两处维护（真机进程读不到 manifest，运行时展示不依赖它）：
 > - 程序内唯一来源：`app/server/version.js` 的 VERSION（侧栏/settings API/MCP serverInfo 显示）

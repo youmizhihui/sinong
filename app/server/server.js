@@ -15,6 +15,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { initDb, getDb, genId, touchUser, getUsers } = require('./db');
 const { parseWorkbook, doImport, extractWorkbookStructure } = require('./import');
+const { parseQuickEntry } = require('./smart-parse');
 const XLSX = require('xlsx');
 
 /** 应用版本号：程序内唯一来源为 ./version.js（真机读不到 manifest，见 version.js 注释） */
@@ -80,6 +81,42 @@ async function callAi(structure) {
   } catch (e) {
     if (e && e.status) throw e;
     if (e && e.name === 'AbortError') throw httpError(504, 'AI 请求超时（45 秒），请检查接口地址或网络');
+    throw httpError(502, `AI 调用失败：${e.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 通用 AI 对话调用（复用设置里的 ai_url/ai_model/ai_key），返回首条回复文本 */
+async function callAiChat(messages, timeoutMs = 20000) {
+  const db = getDb();
+  const url = db.prepare("SELECT value FROM setting WHERE key='ai_url'").get()?.value;
+  const model = db.prepare("SELECT value FROM setting WHERE key='ai_model'").get()?.value;
+  const key = db.prepare("SELECT value FROM setting WHERE key='ai_key'").get()?.value;
+  if (!url || !model) throw httpError(400, '请先在「设置 - AI 识别配置」中填写 API 地址和模型');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let endpoint = url;
+    if (!/\/chat\/completions$/.test(endpoint)) endpoint = endpoint.replace(/\/+$/, '') + '/chat/completions';
+    const headers = { 'Content-Type': 'application/json' };
+    if (key) headers['Authorization'] = `Bearer ${key}`;
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model, temperature: 0, messages }),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw httpError(502, `AI 接口错误 ${res.status}：${data?.error?.message || res.statusText}`);
+    const text = data.choices?.[0]?.message?.content || '';
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) throw httpError(502, 'AI 返回内容不是有效 JSON');
+    return JSON.parse(text.slice(start, end + 1));
+  } catch (e) {
+    if (e && e.status) throw e;
+    if (e && e.name === 'AbortError') throw httpError(504, 'AI 请求超时，请检查接口地址或网络');
     throw httpError(502, `AI 调用失败：${e.message}`);
   } finally {
     clearTimeout(timer);
@@ -1556,6 +1593,114 @@ function createRouter(user) {
       return { entries, total, hasMore: offset + rows.length < total, summary: { income, expense, refund, netExpense: expense - refund }, search };
     },
     'POST /api/entries': async (body, _p, req) => createEntry(getUser(req), body),
+
+    // ---- 智能识别（备注快速记账）----
+    // 分类路径 → 账本内 categoryId：名称精确匹配，退而求其次互相包含
+    'POST /api/smart-parse': (body) => {
+      const text = String(body?.text || '').trim();
+      if (!text) throw httpError(400, '内容为空');
+      const r = parseQuickEntry(text);
+      const db = getDb();
+      const cats = db.prepare("SELECT id,name,parent_id FROM category WHERE type='expense'").all();
+      const parents = cats.filter((c) => !c.parent_id);
+      let categoryId = null;
+      let categoryName = null;
+      if (r.categoryPath) {
+        const want0 = r.categoryPath[0];
+        const p = parents.find((c) => c.name === want0)
+          || parents.find((c) => c.name.includes(want0) || want0.includes(c.name));
+        if (p) {
+          categoryId = p.id;
+          categoryName = p.name;
+          if (r.categoryPath[1]) {
+            const kids = cats.filter((c) => c.parent_id === p.id);
+            const want1 = r.categoryPath[1];
+            const k = kids.find((c) => c.name === want1)
+              || kids.find((c) => c.name.includes(want1) || want1.includes(c.name));
+            if (k) {
+              categoryId = k.id;
+              categoryName = `${p.name}-${k.name}`;
+            }
+          }
+        }
+      }
+      return {
+        amount: r.amountFen,
+        categoryId,
+        categoryName,
+        entryDate: r.entryDate,
+        confidence: r.confidence,
+        trace: r.trace,
+        note: r.note,
+      };
+    },
+    'POST /api/smart-parse/ai': async (body) => {
+      const text = String(body?.text || '').trim();
+      if (!text) throw httpError(400, '内容为空');
+      const db = getDb();
+      const cats = db.prepare("SELECT id,name,parent_id FROM category WHERE type='expense' ORDER BY sort, created_at").all();
+      const parents = cats.filter((c) => !c.parent_id);
+      const catLines = parents.map((p) => {
+        const kids = cats.filter((c) => c.parent_id === p.id).map((c) => c.name).join('/');
+        return kids ? `${p.name}(${kids})` : p.name;
+      }).join('、');
+      const now = new Date();
+      const p2 = (n) => String(n).padStart(2, '0');
+      const nowStr = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}`;
+      const data = await callAiChat([
+        {
+          role: 'system',
+          content: '你是家庭记账应用的智能解析器。从用户文本中识别一笔支出记录，只输出一个 JSON 对象，不要输出任何其他文字。'
+            + '字段：amount_fen（金额，单位分，整数；文本没有金额则 null）、category（分类，格式"一级/二级"，必须从给出的分类中选择，不确定则 null）、'
+            + 'entry_datetime（发生时间，格式 YYYY-MM-DD HH:MM:SS，根据文本中的时间词推算；没有明确时间用 null）、'
+            + 'confidence（0 到 1 的小数，表示整体识别把握）、reason（20 字内的识别理由）。',
+        },
+        { role: 'user', content: `当前时间：${nowStr}\n可选分类：${catLines}\n用户文本：「${text}」` },
+      ]);
+      const amountFen = Number.isInteger(data.amount_fen) && data.amount_fen > 0 && data.amount_fen <= 100000000 ? data.amount_fen : null;
+      const dtStr = typeof data.entry_datetime === 'string' && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/.test(data.entry_datetime.trim())
+        ? data.entry_datetime.trim() : null;
+      // 时间兜底：AI 只给了日期没有时刻 → 补当前时刻；全空 → 当前时间
+      let entryDate;
+      if (dtStr) {
+        entryDate = dtStr.length === 10 ? `${dtStr} ${nowStr.slice(11)}` : dtStr;
+      } else {
+        entryDate = `${nowStr}:${p2(now.getSeconds())}`;
+      }
+      // 分类映射（与本地路由同规则）
+      let categoryId = null;
+      let categoryName = null;
+      if (typeof data.category === 'string' && data.category.trim()) {
+        const seg = data.category.split('/').map((s) => s.trim()).filter(Boolean);
+        const want0 = seg[0] || '';
+        const p = parents.find((c) => c.name === want0)
+          || parents.find((c) => c.name.includes(want0) || want0.includes(c.name));
+        if (p) {
+          categoryId = p.id;
+          categoryName = p.name;
+          if (seg[1]) {
+            const kids = cats.filter((c) => c.parent_id === p.id);
+            const k = kids.find((c) => c.name === seg[1])
+              || kids.find((c) => c.name.includes(seg[1]) || seg[1].includes(c.name));
+            if (k) {
+              categoryId = k.id;
+              categoryName = `${p.name}-${k.name}`;
+            }
+          }
+        }
+      }
+      const confidence = Number.isFinite(Number(data.confidence)) ? Math.min(Math.max(Number(data.confidence), 0), 1) : 0.5;
+      return {
+        amount: amountFen,
+        categoryId,
+        categoryName,
+        entryDate,
+        confidence,
+        trace: [String(data.reason || 'AI 识别')],
+        note: text,
+        source: 'ai',
+      };
+    },
     'GET /api/entries/:id': (_b, p) => {
       const e = getEntryById(p.id);
       if (!e) throw httpError(404, '流水不存在');
