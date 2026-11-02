@@ -17,6 +17,8 @@ interface Ledger {
   type?: 'private' | 'shared'
   owner_uid?: string | null
   ownerName?: string
+  /** 是否为账本所有者：成员管理/切换类型/删除账本仅所有者可用 */
+  isOwner?: boolean
   entryCount?: number
   members?: LedgerMember[]
 }
@@ -101,7 +103,8 @@ async function saveEdit() {
         }
         if (toSkip.length) {
           const names = toSkip.map((a) => `「${a.name}」`).join('、')
-          msg += `${names} 因在其他账本中有记录，本次不做修改。\n该账本将无法使用这些账户记账，如需变更请手动到账户管理修改。`
+          const fix = editType.value === 'shared' ? '取消勾选「私有账户」' : '勾选「私有账户」'
+          msg += `${names} 因在其他账本中有记录，本次不做修改。\n切换后本账本将无法用这些账户记账；如需使用，请到「账户」页编辑它们，${fix}。`
         }
         await showConfirmDialog({ title: '确认切换账本类型', message: msg, confirmButtonText: '确认切换', cancelButtonText: '取消' })
       }
@@ -111,8 +114,10 @@ async function saveEdit() {
   }
   saving.value = true
   try {
-    const payload: Record<string, unknown> = { name: editName.value.trim(), type: editType.value }
-    if (menuTarget.value.type !== 'shared' && editType.value === 'shared' && editShareToAll.value) {
+    // 非所有者只能改名，不带 type（后端会 403）
+    const payload: Record<string, unknown> = { name: editName.value.trim() }
+    if (menuTarget.value.isOwner) payload.type = editType.value
+    if (menuTarget.value.isOwner && menuTarget.value.type !== 'shared' && editType.value === 'shared' && editShareToAll.value) {
       payload.shareToAll = true
     }
     await api.put(`ledgers/${menuTarget.value.id}`, payload)
@@ -273,8 +278,9 @@ async function toggleMember(u: FnosUser) {
       </div>
       <div class="menu-body">
         <button class="menu-item" @click="editLedger">编辑账本</button>
-        <button v-if="menuTarget?.type !== 'private'" class="menu-item" @click="openMembers(menuTarget!)">成员管理</button>
-        <button class="menu-item danger" @click="removeLedger">删除账本</button>
+        <button v-if="menuTarget?.type !== 'private' && menuTarget?.isOwner" class="menu-item" @click="openMembers(menuTarget!)">成员管理</button>
+        <button v-if="menuTarget?.isOwner" class="menu-item danger" @click="removeLedger">删除账本</button>
+        <div v-if="menuTarget && !menuTarget.isOwner" class="menu-tip muted">成员管理与删除仅账本所有者可用</div>
       </div>
     </van-popup>
 
@@ -318,15 +324,16 @@ async function toggleMember(u: FnosUser) {
       <div class="form-body">
         <input v-model="editName" class="name-input" maxlength="12" placeholder="账本名称" />
         <div class="type-select">
-          <button class="type-opt" :class="{ on: editType === 'private' }" @click="editType = 'private'">
+          <button class="type-opt" :class="{ on: editType === 'private' }" :disabled="!menuTarget?.isOwner" @click="editType = 'private'">
             <Lock :size="16" /> 私人账本
           </button>
-          <button class="type-opt" :class="{ on: editType === 'shared' }" @click="editType = 'shared'">
+          <button class="type-opt" :class="{ on: editType === 'shared' }" :disabled="!menuTarget?.isOwner" @click="editType = 'shared'">
             <Users :size="16" /> 共享账本
           </button>
         </div>
-        <div v-if="editType === 'shared'" class="type-tip">转为共享后可在成员管理中添加家人</div>
-        <label v-if="editType === 'shared' && menuTarget?.type !== 'shared'" class="share-all-row">
+        <div v-if="menuTarget && !menuTarget.isOwner" class="type-tip">只有账本所有者可以切换类型，你只能修改名称</div>
+        <div v-else-if="editType === 'shared'" class="type-tip">转为共享后可在成员管理中添加家人</div>
+        <label v-if="menuTarget?.isOwner && editType === 'shared' && menuTarget?.type !== 'shared'" class="share-all-row">
           <input type="checkbox" v-model="editShareToAll" />
           <span>所有人可见（家人打开即见，无需手动添加）</span>
         </label>
@@ -436,6 +443,7 @@ async function toggleMember(u: FnosUser) {
   border: 1px solid var(--border); font-size: 15px; color: var(--text);
 }
 .menu-item.danger { color: var(--expense); }
+.menu-tip { font-size: 12px; line-height: 1.5; padding: 2px 2px 0; }
 .form-body { padding: 4px 16px 18px; }
 .rel-label { font-size: 12px; margin-bottom: 8px; }
 .tmpl-chips { display: flex; gap: 8px; flex-wrap: wrap; }

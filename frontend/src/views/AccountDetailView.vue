@@ -7,6 +7,7 @@ import { store, fmtMoney } from '../store'
 import { ArrowLeft, Pencil, ReceiptText, Trash2, ArrowLeftRight, ArrowUp, ChevronDown, ChevronRight } from 'lucide-vue-next'
 import { iconForCat } from '../catIcons'
 import { showToast, showConfirmDialog } from 'vant'
+import AccountEditSheet from '../components/AccountEditSheet.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -16,7 +17,6 @@ const account = ref<any>(null)
 const members = ref<Member[]>([])
 const loading = ref(true)
 const showEdit = ref(false)
-const editForm = ref({ name: '', note: '', type: 'cash', statementDay: 1, statementDayIncluded: false })
 const showTop = ref(false)
 
 /** 账期（服务端聚合） */
@@ -130,33 +130,7 @@ onUnmounted(() => {
 
 function openEdit() {
   if (!account.value) return
-  editForm.value = {
-    name: account.value.name,
-    note: account.value.note || '',
-    type: account.value.type,
-    statementDay: account.value.statement_day || 1,
-    statementDayIncluded: !!account.value.statement_day_included,
-  }
   showEdit.value = true
-}
-
-async function saveEdit() {
-  if (!editForm.value.name.trim()) { showToast('请输入账户名称'); return }
-  try {
-    await api.put(`accounts/${accountId}`, {
-      name: editForm.value.name.trim(),
-      note: editForm.value.note.trim() || null,
-      type: editForm.value.type,
-      statementDay: editForm.value.statementDay || 1,
-      statementDayIncluded: editForm.value.statementDay > 1 ? editForm.value.statementDayIncluded : false,
-    })
-    store.accountsDirty = true
-    showToast('已保存')
-    showEdit.value = false
-    await load()
-  } catch (e) {
-    showToast((e as Error).message)
-  }
 }
 
 async function delAccount() {
@@ -306,40 +280,14 @@ onMounted(load)
     <!-- 回到顶部 -->
     <button v-if="showTop" class="back-top" @click="scrollTop"><ArrowUp :size="18" /></button>
 
-    <!-- 编辑弹层 -->
-    <van-popup v-model:show="showEdit" position="bottom" round>
-      <div class="pop-head">
-        <span class="pop-title">编辑账户</span>
-        <button class="pop-close" @click="showEdit = false"><span style="font-size:20px;">×</span></button>
-      </div>
-      <div class="form-body">
-        <div class="type-grid">
-          <button
-            v-for="(label, t) in TYPE_LABEL" :key="t"
-            class="type-item" :class="{ sel: editForm.type === t }"
-            @click="editForm.type = t"
-          >{{ label }}</button>
-        </div>
-        <input v-model="editForm.name" class="field" placeholder="账户名称" />
-        <input v-model="editForm.note" class="field" placeholder="备注（可选）" />
-        <div class="credit-box">
-          <div class="credit-row">
-            <span class="credit-label">账单日</span>
-            <select v-model.number="editForm.statementDay" class="field day-select">
-              <option v-for="d in 31" :key="d" :value="d">{{ d }} 日</option>
-            </select>
-          </div>
-          <label v-if="editForm.statementDay > 1" class="privacy-row">
-            <input v-model="editForm.statementDayIncluded" type="checkbox" />
-            <span>账单日消费计入本期账单</span>
-            <small>默认不计入，归入下一期</small>
-          </label>
-          <div class="credit-tip">账期按月分组：1 号即自然月；修改账单日后，历史流水将按新账期重新划分</div>
-        </div>
-        <button class="save-btn" :disabled="!editForm.name.trim()" @click="saveEdit">保存</button>
-        <button class="del-btn" @click="delAccount"><Trash2 :size="14" /> 删除账户</button>
-      </div>
-    </van-popup>
+    <!-- 编辑账户（与账户页共用同一弹层组件） -->
+    <AccountEditSheet v-model:show="showEdit" :account="account" @saved="load">
+      <template #footer>
+        <button class="del-btn" :disabled="account?.canManage === false" @click="delAccount">
+          <Trash2 :size="14" /> {{ account?.canManage === false ? '仅创建者可删除' : '删除账户' }}
+        </button>
+      </template>
+    </AccountEditSheet>
   </div>
 </template>
 
@@ -368,33 +316,12 @@ onMounted(load)
 .acc-note { font-size: 12px; opacity: 0.7; margin-top: 6px; }
 .empty { text-align: center; color: var(--text2); padding: 40px 0 30px; }
 .empty p { margin-top: 8px; }
-.pop-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 18px 12px; border-bottom: 1px solid var(--border);
-}
-.pop-title { font-size: 16px; font-weight: 600; }
-.pop-close { padding: 4px 8px; color: var(--text2); background: none; border: none; cursor: pointer; }
-.form-body { padding: 16px 18px 24px; display: flex; flex-direction: column; gap: 12px; }
-.type-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.type-item {
-  padding: 10px 0; border-radius: 10px; border: 1px solid var(--border);
-  background: var(--card); font-size: 13px; cursor: pointer; color: var(--text);
-}
-.type-item.sel { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); font-weight: 600; }
-.field {
-  border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 12px; width: 100%;
-}
-.save-btn {
-  padding: 12px; border: none; border-radius: 12px;
-  background: var(--brand); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
-}
-.save-btn:disabled { opacity: 0.5; }
 .del-btn {
   padding: 10px; border: none; border-radius: 12px;
   background: var(--bg); color: var(--expense); font-size: 14px;
   display: flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer;
 }
+.del-btn:disabled { opacity: 0.45; cursor: default; }
 .load-more {
   text-align: center; padding: 16px 0; font-size: 13px; color: var(--text2);
 }
@@ -420,13 +347,6 @@ onMounted(load)
 .cycle-meta { display: flex; gap: 12px; font-size: 11px; padding-left: 21px; flex-wrap: wrap; }
 .cycle-day { border-top: none; }
 .cycle-group .day-head { padding-left: 4px; }
-.credit-box { display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px dashed var(--border); border-radius: 10px; }
-.credit-row { display: flex; align-items: center; gap: 10px; }
-.credit-label { font-size: 13px; white-space: nowrap; }
-.day-select { flex: 1; padding: 8px 10px; }
-.privacy-row { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
-.privacy-row small { color: var(--text2); font-size: 11px; margin-left: 4px; }
-.credit-tip { font-size: 11px; color: var(--text2); }
 .back-top {
   position: fixed; right: 16px; bottom: 80px;
   width: 40px; height: 40px; border-radius: 50%;

@@ -268,6 +268,45 @@ function migrate() {
   }
   // 所有账户统一按账期分组：账单日缺省按 1 号（= 自然月）
   db.exec('UPDATE account SET statement_day = 1 WHERE statement_day IS NULL OR statement_day < 1 OR statement_day > 31');
+  // ---------- 归属回填 ----------
+  // 早期版本没有 owner_uid 列，历史数据的归属是空的；改为私有/共享时也可能没写归属。
+  // 归属为空会导致两种故障：
+  //   1) 私有账本/私有账户：按 owner_uid 过滤，无主 = 谁都看不见，等于数据消失；
+  //   2) 共享账本：isOwner 退化为「人人可管理」，能改类型、删账本，绕过共享隔离。
+  //
+  // 「真实用户」候选顺序：已登录过的本人 → 最早的本人成员 → 最早登录的用户。
+  // 一律排除 local-user：它是早期本地调试用的占位身份，永远不会再登录，
+  // 归属记到它头上等于记到了黑洞里（用户的账本会显示成「不是我的」）。
+  const REAL_UID = `COALESCE(
+    (SELECT m.fnos_uid FROM member m JOIN app_user a ON a.uid = m.fnos_uid
+       WHERE m.relation = 'self' AND m.fnos_uid NOT IN ('', 'local-user')
+       ORDER BY m.created_at, m.id LIMIT 1),
+    (SELECT m.fnos_uid FROM member m
+       WHERE m.relation = 'self' AND m.fnos_uid NOT IN ('', 'local-user')
+       ORDER BY m.created_at, m.id LIMIT 1),
+    (SELECT uid FROM app_user WHERE uid NOT IN ('', 'local-user') ORDER BY last_seen ASC LIMIT 1)
+  )`;
+  const ORPHAN = `(owner_uid IS NULL OR owner_uid = '' OR owner_uid = 'local-user')`;
+  // 账户无主：私有账户会从账户页消失；共享账户会变成谁都不能改归属/删除的公用账户
+  // （早期版本建账户不写 owner_uid，导入也只给私有账户写）。一律回填给最早的真实用户
+  db.exec(`UPDATE account SET owner_uid = ${REAL_UID} WHERE ${ORPHAN} AND (${REAL_UID}) IS NOT NULL`);
+  // 默认账本：种子数据建库时还没有用户身份，由最早的登录用户认领
+  db.exec(`UPDATE ledger SET owner_uid = ${REAL_UID} WHERE is_default = 1 AND ${ORPHAN} AND (${REAL_UID}) IS NOT NULL`);
+  // 私有账本无主 = 谁都看不见，必须回填
+  db.exec(`UPDATE ledger SET owner_uid = ${REAL_UID} WHERE type = 'private' AND ${ORPHAN} AND (${REAL_UID}) IS NOT NULL`);
+  // 共享账本无主不影响可见性（靠 ledger_share），但会让所有人都能管理，
+  // 所以回填给最早的成员记录（建账本时先插入的就是创建者），兜底才用最早用户
+  db.exec(`UPDATE ledger SET owner_uid = COALESCE(
+    (SELECT s.user_id FROM ledger_share s
+       WHERE s.ledger_id = ledger.id AND s.user_id NOT IN ('*', 'local-user')
+       ORDER BY s.rowid LIMIT 1),
+    ${REAL_UID}
+  ) WHERE type = 'shared' AND ${ORPHAN} AND COALESCE(
+    (SELECT s.user_id FROM ledger_share s
+       WHERE s.ledger_id = ledger.id AND s.user_id NOT IN ('*', 'local-user')
+       ORDER BY s.rowid LIMIT 1),
+    ${REAL_UID}
+  ) IS NOT NULL`);
   // 历史导入残留的负金额修正：系统约定 amount 恒为正，方向由 flow_type 决定
   db.exec('UPDATE entry SET amount = ABS(amount) WHERE amount < 0');
   // 默认消费平台种子（表空时才插入，用户自定义后不再覆盖）

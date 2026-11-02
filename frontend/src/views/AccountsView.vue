@@ -1,17 +1,19 @@
 <script setup lang="ts">
 defineOptions({ name: 'AccountsView' })
-import { ref, computed, onMounted, onActivated, onDeactivated } from 'vue'
+import { ref, onMounted, onActivated, onDeactivated } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, type AccountsData } from '../api'
+import { api, type Account, type AccountsData } from '../api'
 import { store, fmtMoney } from '../store'
-import { Eye, EyeOff, Plus, Wallet, ChevronDown, ChevronUp, ArrowUp } from 'lucide-vue-next'
+import { Eye, EyeOff, Plus, Wallet, ChevronDown, ChevronUp, ArrowUp, Pencil } from 'lucide-vue-next'
+import AccountEditSheet from '../components/AccountEditSheet.vue'
 
 const router = useRouter()
 const data = ref<AccountsData | null>(null)
 const loading = ref(true)
 const collapsed = ref<Record<string, boolean>>({})
 const showForm = ref(false)
-const form = ref({ type: 'cash', name: '', balance: '', isPrivate: false, statementDay: 1, statementDayIncluded: false })
+/** 有值为编辑，为空为新增 */
+const editingAccount = ref<Account | null>(null)
 const showTop = ref(false)
 
 const TYPE_LABEL: Record<string, string> = {
@@ -23,12 +25,15 @@ const TYPE_DESC: Record<string, string> = {
   online: '微信/支付宝等', investment: '基金、股票等', stored: '购物卡、会员卡', receivable: '应收、应付、借款',
   archived: '不再使用的卡/账户',
 }
-// 新建账户时可选的类型（封存是状态，不在新建时选择）
-const creatableTypes = computed(() => {
-  const out: Record<string, string> = {}
-  for (const [k, v] of Object.entries(TYPE_LABEL)) if (k !== 'archived') out[k] = v
-  return out
-})
+
+function openCreate() {
+  editingAccount.value = null
+  showForm.value = true
+}
+function openEdit(a: Account) {
+  editingAccount.value = a
+  showForm.value = true
+}
 
 async function load() {
   data.value = await api.get<AccountsData>('accounts?scope=all')
@@ -55,26 +60,14 @@ onDeactivated(() => {
   window.removeEventListener('scroll', onWinScroll)
 })
 
-async function create() {
-  const balance = Math.round(parseFloat(form.value.balance || '0') * 100)
-  await api.post('accounts', {
-    type: form.value.type,
-    name: form.value.name.trim(),
-    balance: Number.isFinite(balance) ? balance : 0,
-    isPrivate: form.value.isPrivate,
-    statementDay: form.value.statementDay || 1,
-    statementDayIncluded: form.value.statementDay > 1 ? form.value.statementDayIncluded : false,
-  })
-  showForm.value = false
-  form.value = { type: 'cash', name: '', balance: '', isPrivate: false, statementDay: 1, statementDayIncluded: false }
+/** 弹层保存成功：刷新列表 */
+async function afterSaved() {
   await load()
 }
 
 function toggle(t: string) {
   collapsed.value[t] = !collapsed.value[t]
 }
-
-onMounted(load)
 onActivated(load)
 </script>
 
@@ -82,7 +75,7 @@ onActivated(load)
   <div class="page">
     <div class="page-head">
       <span class="page-title">账户</span>
-      <button class="head-add" @click="showForm = true"><Plus :size="20" /></button>
+      <button class="head-add" @click="openCreate"><Plus :size="20" /></button>
     </div>
 
     <!-- 净资产卡 -->
@@ -132,53 +125,15 @@ onActivated(load)
               <div class="muted">{{ a.note || TYPE_DESC[a.type] || '' }}</div>
             </div>
             <span class="num" :class="a.currentBalance < 0 ? 'money-expense' : ''">{{ fmtMoney(a.currentBalance) }}</span>
+            <button class="row-edit" title="编辑账户" @click.stop="openEdit(a)"><Pencil :size="14" /></button>
           </div>
         </template>
       </div>
       </template>
     </div>
 
-    <!-- 表单弹层 -->
-    <div v-if="showForm" class="mask" @click.self="showForm = false">
-      <div class="sheet">
-        <div class="sheet-title">新增账户</div>
-        <div class="type-grid">
-          <button
-            v-for="(label, t) in creatableTypes" :key="t"
-            class="type-item" :class="{ sel: form.type === t }"
-            @click="form.type = t"
-          >
-            <span>{{ label }}</span>
-            <small>{{ TYPE_DESC[t] }}</small>
-          </button>
-        </div>
-        <input v-model="form.name" class="field" placeholder="账户名称（必填）" />
-        <input v-model="form.balance" class="field" type="number" placeholder="初始余额（元，默认 0，可负）" />
-        <div class="credit-box">
-          <div class="credit-row">
-            <span class="credit-label">账单日</span>
-            <select v-model.number="form.statementDay" class="field day-select">
-              <option v-for="d in 31" :key="d" :value="d">{{ d }} 日</option>
-            </select>
-          </div>
-          <label v-if="form.statementDay > 1" class="privacy-row">
-            <input v-model="form.statementDayIncluded" type="checkbox" />
-            <span>账单日消费计入本期账单</span>
-            <small>默认不计入，归入下一期</small>
-          </label>
-          <div class="credit-tip">账期按月分组：1 号即自然月；设为其他日期则按账单周期划分</div>
-        </div>
-        <label class="privacy-row">
-          <input v-model="form.isPrivate" type="checkbox" />
-          <span>私有账户</span>
-          <small>仅在私人账本中可见，共享成员看不到</small>
-        </label>
-        <div class="sheet-actions">
-          <button class="btn ghost" @click="showForm = false">取消</button>
-          <button class="btn primary" :disabled="!form.name.trim()" @click="create">保存</button>
-        </div>
-      </div>
-    </div>
+    <!-- 新增 / 编辑账户（与账户详情页共用同一弹层组件） -->
+    <AccountEditSheet v-model:show="showForm" :account="editingAccount" @saved="afterSaved" />
 
     <!-- 回到顶部 -->
     <button v-if="showTop" class="back-top" @click="scrollTop"><ArrowUp :size="18" /></button>
@@ -223,53 +178,14 @@ onActivated(load)
   background: #FEF3C7; color: #92400E; font-weight: 400;
 }
 .row.archived { opacity: 0.55; }
+.row-edit {
+  padding: 4px; margin-left: 2px;
+  color: var(--text2); display: flex; flex-shrink: 0;
+}
 
 .page-head { display: flex; align-items: center; justify-content: space-between; }
 .head-add { padding: 6px; color: var(--brand); display: flex; }
 
-.mask {
-  position: fixed; inset: 0; z-index: 200;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex; align-items: flex-end; justify-content: center;
-}
-.sheet {
-  width: 100%; max-width: 480px;
-  background: var(--card);
-  border-radius: 18px 18px 0 0;
-  padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
-  display: flex; flex-direction: column; gap: 12px;
-}
-.sheet-title { font-size: 16px; font-weight: 600; }
-.type-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
-.type-item {
-  border: 1px solid var(--border); border-radius: 10px;
-  padding: 8px 10px; text-align: left;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.type-item.sel { border-color: var(--brand); background: var(--brand-soft); }
-.type-item small { font-size: 10px; color: var(--text2); }
-.field {
-  border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 12px; width: 100%;
-}
-.privacy-row {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 13px; cursor: pointer;
-}
-.privacy-row small { color: var(--text2); font-size: 11px; margin-left: 4px; }
-.credit-box { display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px dashed var(--border); border-radius: 10px; }
-.credit-row { display: flex; align-items: center; gap: 10px; }
-.credit-label { font-size: 13px; white-space: nowrap; }
-.day-select { flex: 1; padding: 8px 10px; }
-.credit-tip { font-size: 11px; color: var(--text2); line-height: 1.5; }
-.sheet-actions { display: flex; gap: 10px; }
-.btn {
-  flex: 1; padding: 12px; border-radius: 10px;
-  font-size: 14px; font-weight: 600;
-}
-.btn.primary { background: var(--brand); color: #fff; }
-.btn.primary:disabled { opacity: 0.4; }
-.btn.ghost { background: var(--bg); color: var(--text2); }
 .back-top {
   position: fixed; right: 16px; bottom: 80px;
   width: 40px; height: 40px; border-radius: 50%;

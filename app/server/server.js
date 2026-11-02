@@ -296,6 +296,60 @@ function requireLedgerAccess(uid, ledgerId) {
   if (!canAccessLedger(uid, ledgerId)) throw httpError(403, '无权访问该账本');
 }
 
+/**
+ * 账本管理权限：成员增删、共享设置、删除账本只允许 owner 操作。
+ * owner_uid 为空的是历史账本，退化为「能访问即可」，避免老账本没人能管。
+ */
+function requireLedgerOwner(uid, ledgerId, action = '管理成员') {
+  const l = getDb().prepare('SELECT owner_uid FROM ledger WHERE id=?').get(ledgerId);
+  if (!l) throw httpError(404, '账本不存在');
+  if (!l.owner_uid) { requireLedgerAccess(uid, ledgerId); return l; }
+  if (l.owner_uid !== uid) throw httpError(403, `只有账本所有者可以${action}`);
+  return l;
+}
+
+/**
+ * 账户可见性校验：共享账户所有人可见；私有账户只有归属人可见。
+ * owner_uid 为空的历史私有账户（迁移回填前的遗留）不做拦截，避免误伤本人。
+ */
+function assertAccountVisible(acc, user) {
+  if (acc.is_private && acc.owner_uid && acc.owner_uid !== user.uid) {
+    throw httpError(403, '无权访问该私有账户');
+  }
+}
+
+/**
+ * 账户管理权：能否改归属（共享 ⇄ 私有）、改初始余额、删除账户。
+ * 可见 ≠ 可管：共享账户所有成员都能看见并使用，但归属是创建者的东西，
+ * 否则任何成员都能把家庭共用账户勾成私有，全家从记账页、账户页都看不到它。
+ * 无主的历史共享账户（owner_uid 为空，如种子「现金」）视为公用账户，不归任何人。
+ */
+function canManageAccount(acc, user) {
+  if (acc.is_private) return acc.owner_uid === user.uid;
+  return !!acc.owner_uid && acc.owner_uid === user.uid;
+}
+
+/** 需要管理权的操作：不允许时给出能看懂的提示 */
+function assertAccountManageable(acc, user) {
+  if (canManageAccount(acc, user)) return;
+  if (!acc.is_private && !acc.owner_uid) {
+    throw httpError(403, '该账户为家庭公用账户（无创建者记录），不能修改归属或删除；如需私有账户请新建一个');
+  }
+  throw httpError(403, '只有账户创建者可以修改归属、余额或删除该账户');
+}
+
+/**
+ * 无主共享账户认领：种子「现金」账户建于 migrate 之后（建库时还没有用户），
+ * 早期版本也不写归属，这类账户没有创建者就没法改归属/删除。
+ * 与默认账本同口径——首个访问者认领，已认领的不再变动。
+ */
+function claimOrphanAccounts(uid) {
+  if (!uid) return;
+  getDb().prepare(
+    "UPDATE account SET owner_uid=? WHERE is_private=0 AND (owner_uid IS NULL OR owner_uid='' OR owner_uid='local-user')"
+  ).run(uid);
+}
+
 /** 当前账本类型：shared 或 private。无当前账本时默认 private */
 function getCurrentLedgerType() {
   const cur = getDb().prepare("SELECT value FROM setting WHERE key='current_ledger'").get();
@@ -474,6 +528,12 @@ function ensureSelfMember(user) {
       m.name = fixed;
     }
   }
+  // 种子账本建库时还没有用户身份，owner_uid 是空的；首个访问者认领它。
+  // 早期本地调试留下的 local-user 归属同样视为无主（那个身份不会再登录）。
+  // 否则无主账本对所有人 open（能改类型/删账本），共享隔离形同虚设
+  db.prepare("UPDATE ledger SET owner_uid=? WHERE is_default=1 AND (owner_uid IS NULL OR owner_uid='' OR owner_uid='local-user')").run(uid);
+  // 账户同理：种子的「现金」账户没有创建者
+  claimOrphanAccounts(uid);
   // 用户无任何可见账本时，自动创建一个私有日常账本
   const has = db.prepare(`
     SELECT COUNT(*) AS n FROM ledger l
@@ -843,6 +903,7 @@ function createRouter(user) {
     // ---- 账户 ----
     'GET /api/accounts': (_b, _p, req) => {
       const user = getUser(req);
+      claimOrphanAccounts(user.uid);
       const ledgerType = getCurrentLedgerType();
       const url = new URL(req.url, 'http://localhost');
       const scope = url.searchParams.get('scope') || 'ledger';
@@ -857,7 +918,8 @@ function createRouter(user) {
           : db.prepare('SELECT * FROM account WHERE is_private=1 AND owner_uid=? ORDER BY sort, created_at').all(user.uid);
       }
       const bals = computeBalances();
-      const list = accs.map((a) => ({ ...a, currentBalance: (a.balance || 0) + (bals.get(a.id) || 0) }));
+      // canManage：能否改归属 / 删除（前端据此禁用控件，避免点了保存才报错）
+      const list = accs.map((a) => ({ ...a, currentBalance: (a.balance || 0) + (bals.get(a.id) || 0), canManage: canManageAccount(a, user) }));
       // 按类型分组统计
       const groups = {};
       for (const a of list) {
@@ -885,9 +947,12 @@ function createRouter(user) {
         .run(id, type, name, Number.isInteger(balance) ? balance : 0, isPrivateVal, user.uid, note || null, 0, sd, sdi, now, now);
       return db.prepare('SELECT * FROM account WHERE id=?').get(id);
     },
-    'GET /api/accounts/:id': (_b, p) => {
+    'GET /api/accounts/:id': (_b, p, req) => {
       const a = db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
       if (!a) throw httpError(404, '账户不存在');
+      // 私有账户只有归属人能看；共享账户对所有人可见
+      const user = getUser(req);
+      assertAccountVisible(a, user);
       const bals = computeBalances();
       const currentBalance = (a.balance || 0) + (bals.get(a.id) || 0);
       // 该账户全部收支统计（不受分页影响）：转入=收入，转出=支出，手动收支同理
@@ -901,7 +966,7 @@ function createRouter(user) {
           else if (r.to_account_id === p.id) income += r.amount; // 转入（含信用卡还款）
         }
       }
-      return { ...a, currentBalance, statIncome: income, statExpense: expense };
+      return { ...a, currentBalance, statIncome: income, statExpense: expense, canManage: canManageAccount(a, user) };
     },
     // 账期聚合：服务端按期统计，避免前端分页导致某期数字不全
     'GET /api/accounts/:id/cycles': (_b, p, req) => {
@@ -912,6 +977,7 @@ function createRouter(user) {
       if (ledgerId) requireLedgerAccess(user.uid, ledgerId);
       const a = db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
       if (!a) throw httpError(404, '账户不存在');
+      assertAccountVisible(a, user);
       const stmtDay = (a.statement_day >= 1 && a.statement_day <= 31) ? a.statement_day : 1;
       const included = !!a.statement_day_included;
       // 分页：limit + before（游标 = 已加载最早一期的 key，取更早的账期）
@@ -975,9 +1041,38 @@ function createRouter(user) {
 
       return { statementDay: stmtDay, included, currentBalance, cycles: rows, hasMore };
     },
-    'PUT /api/accounts/:id': async (body, p) => {
+    'GET /api/accounts/:id/usage': (_b, p, req) => {
+      // 账户使用情况：改「共享 / 私有」归属前用它判断影响面
+      const acc = db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
+      if (!acc) throw httpError(404, '账户不存在');
+      assertAccountVisible(acc, getUser(req));
+      const row = db.prepare(`
+        SELECT COUNT(*) AS entries,
+               COUNT(DISTINCT e.ledger_id) AS ledgers,
+               SUM(CASE WHEN l.type='shared' THEN 1 ELSE 0 END) AS shared_entries,
+               SUM(CASE WHEN l.type='private' THEN 1 ELSE 0 END) AS private_entries
+        FROM entry e
+        LEFT JOIN ledger l ON l.id = e.ledger_id
+        WHERE e.account_id=? OR e.to_account_id=?
+      `).get(p.id, p.id);
+      return {
+        entries: row?.entries || 0,
+        ledgers: row?.ledgers || 0,
+        sharedEntries: row?.shared_entries || 0,
+        privateEntries: row?.private_entries || 0,
+      };
+    },
+    'PUT /api/accounts/:id': async (body, p, req) => {
+      const user = getUser(req);
       const a = db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
       if (!a) throw httpError(404, '账户不存在');
+      assertAccountVisible(a, user);
+      // 归属与初始余额只有创建者能改；改名/备注/类型/账单日属于协作项，所有可见成员都能改。
+      // 前端编辑弹层会整包提交 isPrivate，所以要按「值是否真的变了」判断，不能看字段有没有出现
+      const wantPrivate = body.isPrivate === undefined ? a.is_private : (body.isPrivate ? 1 : 0);
+      const touchingOwnership = wantPrivate !== a.is_private;
+      const touchingBalance = body.balance !== undefined && Number.isInteger(body.balance) && body.balance !== a.balance;
+      if (touchingOwnership || touchingBalance) assertAccountManageable(a, user);
       const fields = []; const vals = [];
       if (body.name !== undefined) { fields.push('name=?'); vals.push(body.name); }
       if (body.note !== undefined) { fields.push('note=?'); vals.push(body.note || null); }
@@ -985,6 +1080,11 @@ function createRouter(user) {
       if (body.balance !== undefined && Number.isInteger(body.balance)) { fields.push('balance=?'); vals.push(body.balance); }
       if (body.isPrivate !== undefined) {
         fields.push('is_private=?'); vals.push(body.isPrivate ? 1 : 0);
+        // 设为私有即由当前用户认领（owner_uid 决定私人账本/账户页里归谁可见）；
+        // 早期共享账户的 owner_uid 可能是 NULL 或创建者，不写会让账户在本人账户页里也消失
+        if (body.isPrivate && (!a.owner_uid || a.is_private === 0)) {
+          fields.push('owner_uid=?'); vals.push(user.uid);
+        }
       }
       if (body.statementDay !== undefined) {
         // 账单日（1-31）：所有账户通用，非法值回落到 1 号
@@ -1000,7 +1100,13 @@ function createRouter(user) {
       db.prepare(`UPDATE account SET ${fields.join(',')} WHERE id=?`).run(...vals);
       return db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
     },
-    'DELETE /api/accounts/:id': async (_b, p) => {
+    'DELETE /api/accounts/:id': async (_b, p, req) => {
+      const a = db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
+      if (!a) throw httpError(404, '账户不存在');
+      const user = getUser(req);
+      assertAccountVisible(a, user);
+      // 删除同样只有创建者能做：共享账户是全家在用的，谁都能删等于随时可以搞坏别人的账
+      assertAccountManageable(a, user);
       const n = db.prepare('SELECT COUNT(*) AS n FROM entry WHERE account_id=? OR to_account_id=?').get(p.id, p.id).n;
       if (n > 0) throw httpError(409, '该账户存在流水，禁止删除');
       db.prepare('DELETE FROM account WHERE id=?').run(p.id);
@@ -1028,7 +1134,8 @@ function createRouter(user) {
         const owner = l.owner_uid
           ? db.prepare("SELECT name FROM member WHERE fnos_uid=?").get(l.owner_uid)
           : null;
-        return { ...l, entryCount: n, members, ownerName: owner ? owner.name : '' };
+        // isOwner：能否管理成员/改类型/删除。无主的历史账本视为可管理（与接口层放行一致）
+        return { ...l, entryCount: n, members, ownerName: owner ? owner.name : '', isOwner: !l.owner_uid || l.owner_uid === u.uid };
       });
       return { ledgers, currentLedgerId: cur ? cur.value : (ls[0] ? ls[0].id : null) };
     },
@@ -1045,18 +1152,21 @@ function createRouter(user) {
       }
       return db.prepare('SELECT * FROM ledger WHERE id=?').get(id);
     },
-    'GET /api/ledgers/:id/members': async (_b, p) => {
+    'GET /api/ledgers/:id/members': async (_b, p, req) => {
+      requireLedgerAccess(getUser(req).uid, p.id);
       const rows = db.prepare('SELECT user_id, perm FROM ledger_share WHERE ledger_id=?').all(p.id);
       return { members: rows };
     },
-    'POST /api/ledgers/:id/members': async (body, p) => {
+    'POST /api/ledgers/:id/members': async (body, p, req) => {
+      requireLedgerOwner(getUser(req).uid, p.id);
       const { userId, perm } = body;
       if (!userId) throw httpError(400, '用户 ID 必填');
       db.prepare('INSERT OR REPLACE INTO ledger_share (ledger_id,user_id,perm) VALUES (?,?,?)')
         .run(p.id, userId, perm || 'rw');
       return { ok: true };
     },
-    'DELETE /api/ledgers/:id/members/:userId': async (_b, p) => {
+    'DELETE /api/ledgers/:id/members/:userId': async (_b, p, req) => {
+      requireLedgerOwner(getUser(req).uid, p.id);
       db.prepare('DELETE FROM ledger_share WHERE ledger_id=? AND user_id=?').run(p.id, p.userId);
       return { ok: true };
     },
@@ -1064,8 +1174,10 @@ function createRouter(user) {
       const l = db.prepare('SELECT * FROM ledger WHERE id=?').get(p.id);
       if (!l) throw httpError(404, '账本不存在');
       const user = getUser(req);
-      // 只有 owner 能修改账本类型
-      if (body.type !== undefined && l.owner_uid !== user.uid) {
+      // 只有 owner 能修改账本类型。
+      // owner_uid 为空的是历史账本（该列是后加的），没有归属可校验：放行，并在转私有时由操作者认领，
+      // 否则这类账本谁都改不了类型，转私有后还会因为 owner 为空而彻底不可见。
+      if (body.type !== undefined && l.owner_uid && l.owner_uid !== user.uid) {
         throw httpError(403, '只有账本所有者能修改类型');
       }
       const fields = []; const vals = [];
@@ -1075,6 +1187,11 @@ function createRouter(user) {
       if (body.icon !== undefined) { fields.push('icon=?'); vals.push(body.icon); }
       if (body.type !== undefined) {
         const newType = body.type === 'shared' ? 'shared' : 'private';
+        // 无主的历史账本：首次改类型时由操作者认领。
+        // 私有账本没有归属会彻底不可见，共享账本也需要 owner 才能判断谁有权改回类型
+        if (!l.owner_uid) {
+          fields.push('owner_uid=?'); vals.push(user.uid);
+        }
         let changedAccs = [];
         let skippedAccs = [];
         // 私人账本转共享：自动把只在当前账本里出现的私有账户改成共享
@@ -1131,9 +1248,9 @@ function createRouter(user) {
       if (body.type !== undefined) {
         const newType = body.type === 'shared' ? 'shared' : 'private';
         if (newType === 'shared') {
-          // 转共享：确保 owner 在共享成员里
+          // 转共享：确保 owner 在共享成员里（无主的老账本用当前操作者，避免写入 user_id 为空的脏记录）
           db.prepare('INSERT OR IGNORE INTO ledger_share (ledger_id,user_id,perm) VALUES (?,?,?)')
-            .run(p.id, l.owner_uid, 'rw');
+            .run(p.id, l.owner_uid || user.uid, 'rw');
           // 用户选择"所有人可见"时，加 '*' 记录
           if (body.shareToAll) {
             db.prepare('INSERT OR IGNORE INTO ledger_share (ledger_id,user_id,perm) VALUES (?,?,?)')
@@ -1153,13 +1270,19 @@ function createRouter(user) {
         }
         if (resSkippedAccs.length) {
           const names = resSkippedAccs.map((a) => `「${a.name}」`).join('、');
-          parts.push(`${names}因在其他账本有记录未变更`);
+          // 这类账户在其他账本还有流水，自动改归属会连带影响别的账本，只能留给用户手动处理。
+          // 提示里必须带方向：转共享要取消私有勾选，转私有要勾上，否则用户不知道该改哪一项
+          const fix = body.type === 'shared'
+            ? '到账户页编辑并取消勾选「私有账户」'
+            : '到账户页编辑并勾选「私有账户」';
+          parts.push(`${names}在其他账本也有记录，未自动变更归属，本账本暂时无法用它们记账；如需使用，请${fix}`);
         }
         return { ...updated, notice: parts.join('；') };
       }
       return updated;
     },
-    'GET /api/ledgers/:id/affected-accounts': (_b, p) => {
+    'GET /api/ledgers/:id/affected-accounts': (_b, p, req) => {
+      requireLedgerAccess(getUser(req).uid, p.id);
       // 返回这个账本里用到的所有账户，以及每个账户是否在其他账本也有记录
       const accs = db.prepare(`
         SELECT DISTINCT a.id, a.name, a.is_private FROM account a
@@ -1176,7 +1299,8 @@ function createRouter(user) {
       });
       return { accounts: result };
     },
-    'DELETE /api/ledgers/:id': async (_b, p) => {
+    'DELETE /api/ledgers/:id': async (_b, p, req) => {
+      requireLedgerOwner(getUser(req).uid, p.id, '删除账本');
       const l = db.prepare('SELECT * FROM ledger WHERE id=?').get(p.id);
       if (!l) throw httpError(404, '账本不存在');
       if (l.is_default) throw httpError(409, '默认账本禁止删除');
@@ -1459,7 +1583,8 @@ function createRouter(user) {
       const { _parsed, ...summary } = parsed;
       return { token, ...summary, ai: mapping };
     },
-    'POST /api/ledgers/:id/share': async (body, p) => {
+    'POST /api/ledgers/:id/share': async (body, p, req) => {
+      requireLedgerOwner(getUser(req).uid, p.id);
       const userId = body.userId || '*';
       const perm = body.perm || 'rw';
       db.prepare('INSERT OR REPLACE INTO ledger_share (ledger_id,user_id,perm) VALUES (?,?,?)')
@@ -2233,7 +2358,11 @@ function findAccountId(ledgerId, name) {
   if (!name) return null;
   const db = getDb();
   const like = `%${name}%`;
-  const r = db.prepare(`SELECT id FROM account WHERE name LIKE ? LIMIT 1`).get(like);
+  // 按账本类型匹配：私人账本只能命中私有账户，共享账本只能命中共享账户，
+  // 否则会匹配到本账本用不了的账户，记账时被归属校验拦掉
+  const lg = ledgerId ? db.prepare('SELECT type FROM ledger WHERE id=?').get(ledgerId) : null;
+  const wantPrivate = lg && lg.type === 'private' ? 1 : 0;
+  const r = db.prepare('SELECT id FROM account WHERE name LIKE ? AND is_private=? LIMIT 1').get(like, wantPrivate);
   return r?.id || null;
 }
 /** 按名称模糊匹配成员 ID */
@@ -2408,9 +2537,11 @@ function mcpCallTool(name, args, mcpUser) {
     const flowType = name === 'add_expense' ? 'expense' : 'income';
     let accountId = findAccountId(ledgerId, args.account);
     if (!accountId) {
-      // 没指定或匹配不到账户时，选第一个账户（优先现金）
-      const fallback = db.prepare(`SELECT id FROM account WHERE name LIKE '%现金%' LIMIT 1`).get()
-        || db.prepare(`SELECT id FROM account ORDER BY sort LIMIT 1`).get();
+      // 没指定或匹配不到账户时，选第一个本账本能用的账户（优先现金）
+      const lgType = db.prepare('SELECT type FROM ledger WHERE id=?').get(ledgerId)?.type || 'shared';
+      const wantPrivate = lgType === 'private' ? 1 : 0;
+      const fallback = db.prepare('SELECT id FROM account WHERE is_private=? AND name LIKE ? ORDER BY sort LIMIT 1').get(wantPrivate, '%现金%')
+        || db.prepare('SELECT id FROM account WHERE is_private=? ORDER BY sort LIMIT 1').get(wantPrivate);
       accountId = fallback?.id;
     }
     const categoryId = findCategoryId(ledgerId, args.category, flowType);
@@ -2436,20 +2567,27 @@ function mcpCallTool(name, args, mcpUser) {
     return mcpResult(`已记转账 ¥${(cents / 100).toFixed(2)}：${args.from_account} → ${args.to_account}`);
   }
   if (name === 'list_accounts') {
-    const rows = db.prepare('SELECT name FROM account ORDER BY name').all();
+    // 只列当前账本能用的账户（共享账本→共享账户，私人账本→私有账户）
+    const lgType = db.prepare('SELECT type FROM ledger WHERE id=?').get(ledgerId)?.type || 'shared';
+    const wantPrivate = lgType === 'private' ? 1 : 0;
+    const rows = db.prepare('SELECT name FROM account WHERE is_private=? ORDER BY name').all(wantPrivate);
     return mcpResult(rows.map(r => r.name).join('\n'));
   }
   if (name === 'create_account') {
     if (!args.name) throw new Error('账户名必填');
-    const exist = db.prepare('SELECT id FROM account WHERE name=?').get(args.name);
+    // 归属跟随当前账本类型：私人账本建私有账户（否则记账时会被"共享账户不能在私人账本记账"拦住），
+    // 共享账本建共享账户
+    const lg = ledgerId ? db.prepare('SELECT type FROM ledger WHERE id=?').get(ledgerId) : null;
+    const isPrivate = lg && lg.type === 'private' ? 1 : 0;
+    const exist = db.prepare('SELECT id FROM account WHERE name=? AND is_private=?').get(args.name, isPrivate);
     if (exist) return mcpResult(`账户"${args.name}"已存在`);
     const id = genId('acc');
     const now = nowIso();
     const type = args.type || 'cash';
     const bal = Math.round(Number(args.balance || 0) * 100);
-    db.prepare('INSERT INTO account (id,type,name,balance,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id, type, args.name, bal, args.note || null, 0, now, now);
-    return mcpResult(`已创建账户：${args.name}（${type}）`);
+    db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, type, args.name, bal, isPrivate, isPrivate ? userId : null, args.note || null, 0, now, now);
+    return mcpResult(`已创建账户：${args.name}（${type}${isPrivate ? '，私有' : '，共享'}）`);
   }
   if (name === 'list_categories') {
     const rows = db.prepare("SELECT id, name, parent_id, type FROM category ORDER BY type, parent_id IS NULL, name").all();

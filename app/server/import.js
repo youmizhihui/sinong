@@ -728,7 +728,8 @@ function doImport(parsed, ledgerId, userUid) {
   const ledger = db.prepare('SELECT type, owner_uid FROM ledger WHERE id=?').get(ledgerId);
   const ledgerType = ledger?.type || 'shared';
   const newAccountIsPrivate = ledgerType === 'private' ? 1 : 0;
-  const newAccountOwnerUid = ledgerType === 'private' ? userUid : null;
+  // 归属一律记导入者：共享账户也需要「创建者」才能改归属/删除（否则任何人能把家庭共用账户勾成私有）
+  const newAccountOwnerUid = userUid;
 
   // 账户分类标签 → type 映射
   const TYPE_LABEL_MAP = {

@@ -54,7 +54,11 @@ export interface Account {
   is_private?: number
   owner_uid?: string | null
   note?: string
+  statement_day?: number
+  statement_day_included?: number
   currentBalance: number
+  /** 能否改归属 / 删除（仅创建者）；共享账户所有成员可见但归属不归他们 */
+  canManage?: boolean
 }
 
 export interface AccountGroup {
@@ -80,6 +84,8 @@ export interface Ledger {
   type?: 'private' | 'shared'
   owner_uid?: string | null
   ownerName?: string
+  /** 当前用户是否为账本所有者：成员管理/切换类型/删除账本仅所有者可用 */
+  isOwner?: boolean
   entryCount?: number
 }
 
