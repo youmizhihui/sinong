@@ -1803,6 +1803,172 @@ function createRouter(user) {
       }
       return { items: out };
     },
+    // 统一报表查询：筛选（成员/分类/账户/类型）+ 时间范围（月/年/自定义）+ 汇总/聚合/明细分页
+    // from/to 为 YYYY-MM-DD（to 含当天）；分类传一级 id 时服务端自动展开其二级；
+    // 成员选中「自己」时包含 member_id 为空的记录（视为自己）；转账默认不参与结余统计。
+    'GET /api/reports/query': async (_b, _p, req) => {
+      const u = new URL(req.url, 'http://x');
+      const user = getUser(req);
+      let ledgerId = u.searchParams.get('ledgerId');
+      if (!ledgerId) {
+        ledgerId = db.prepare("SELECT value FROM setting WHERE key='current_ledger'").get()?.value;
+      }
+      if (!ledgerId) throw httpError(400, '缺少账本');
+      requireLedgerAccess(user.uid, ledgerId);
+      const from = u.searchParams.get('from');
+      const to = u.searchParams.get('to');
+      if (!from || !to || from > to) throw httpError(400, '时间范围无效');
+      const idsParam = (k) => (u.searchParams.get(k) || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const memberIds = idsParam('memberIds');
+      const categoryIds = idsParam('categoryIds');
+      const accountIds = idsParam('accountIds');
+      const type = ['expense', 'income', 'all'].includes(u.searchParams.get('type')) ? u.searchParams.get('type') : 'all';
+      const page = Math.max(1, parseInt(u.searchParams.get('page') || '1', 10));
+      const pageSize = Math.min(Math.max(parseInt(u.searchParams.get('pageSize') || '50', 10), 1), 200);
+
+      // 自己的 member id：member_id 为空的记录视为自己
+      const selfMember = db.prepare('SELECT id FROM member WHERE fnos_uid=? AND relation=?').get(user.uid || 'local-user', 'self');
+      const selfMemberId = selfMember?.id || null;
+
+      // 分类多选展开：所选一级自动并入其全部二级
+      const catAll = [...categoryIds];
+      if (categoryIds.length) {
+        const kids = db.prepare(`SELECT id FROM category WHERE parent_id IN (${categoryIds.map(() => '?').join(',')})`).all(...categoryIds);
+        for (const k of kids) if (!catAll.includes(k.id)) catAll.push(k.id);
+      }
+
+      const mkWhere = (f, t) => {
+        const where = ['ledger_id=?']; const vals = [ledgerId];
+        where.push('entry_date>=?'); vals.push(f);
+        where.push('entry_date<=?'); vals.push(`${t} 23:59:59`);
+        if (memberIds.length) {
+          const hasSelf = selfMemberId && memberIds.includes(selfMemberId);
+          where.push(`(member_id IN (${memberIds.map(() => '?').join(',')})${hasSelf ? ' OR member_id IS NULL' : ''})`);
+          vals.push(...memberIds);
+        }
+        if (catAll.length) { where.push(`category_id IN (${catAll.map(() => '?').join(',')})`); vals.push(...catAll); }
+        if (accountIds.length) {
+          where.push(`(account_id IN (${accountIds.map(() => '?').join(',')}) OR to_account_id IN (${accountIds.map(() => '?').join(',')}))`);
+          vals.push(...accountIds, ...accountIds);
+        }
+        if (type === 'expense') where.push("flow_type='expense'");
+        else if (type === 'income') where.push("flow_type='income'");
+        else where.push("flow_type IN ('expense','income','refund')");
+        return { sql: where.join(' AND '), vals };
+      };
+
+      const { sql: wsql, vals: wvals } = mkWhere(from, to);
+      const rows = db.prepare(`SELECT flow_type, amount, category_id, member_id, account_id, entry_date FROM entry WHERE ${wsql} ORDER BY entry_date DESC, created_at DESC`).all(...wvals);
+
+      // ---- 汇总 + 各维度聚合（基于全部命中行，不受分页影响）----
+      // 构成/占比跟随筛选类型：选「收入」时按收入聚合，其余（支出/全部）按支出聚合
+      const compType = type === 'income' ? 'income' : 'expense';
+      let income = 0, expense = 0, refund = 0;
+      const catSum = {}, memberSum = {}, accSum = {}, monthMap = {};
+      for (const r of rows) {
+        if (r.flow_type === 'income') {
+          income += r.amount;
+        } else if (r.flow_type === 'expense') {
+          expense += r.amount;
+        } else if (r.flow_type === 'refund') {
+          refund += r.amount;
+        }
+        if (r.flow_type === compType) {
+          if (r.category_id) catSum[r.category_id] = (catSum[r.category_id] || 0) + r.amount;
+          const mk = r.member_id || selfMemberId;
+          if (mk) memberSum[mk] = (memberSum[mk] || 0) + r.amount;
+          if (r.account_id) accSum[r.account_id] = (accSum[r.account_id] || 0) + r.amount;
+        }
+        const mk = r.entry_date.slice(0, 7);
+        if (!monthMap[mk]) monthMap[mk] = { month: mk, income: 0, expense: 0, refund: 0 };
+        if (r.flow_type === 'income') monthMap[mk].income += r.amount;
+        else if (r.flow_type === 'expense') monthMap[mk].expense += r.amount;
+        else if (r.flow_type === 'refund') monthMap[mk].refund += r.amount;
+      }
+      const netExpense = expense - refund;
+
+      // 日均：按区间自然天数
+      const d1 = new Date(`${from}T00:00:00`), d2 = new Date(`${to}T00:00:00`);
+      const rangeDays = Math.max(1, Math.round((d2 - d1) / 86400000) + 1);
+
+      // 环比：同长度前一周期
+      const prevTo = new Date(d1); prevTo.setDate(prevTo.getDate() - 1);
+      const prevFrom = new Date(prevTo);
+      prevFrom.setDate(prevFrom.getDate() - (rangeDays - 1));
+      const pf = `${prevFrom.getFullYear()}-${String(prevFrom.getMonth() + 1).padStart(2, '0')}-${String(prevFrom.getDate()).padStart(2, '0')}`;
+      const pt = `${prevTo.getFullYear()}-${String(prevTo.getMonth() + 1).padStart(2, '0')}-${String(prevTo.getDate()).padStart(2, '0')}`;
+      const prevRows = db.prepare(`SELECT flow_type, amount FROM entry WHERE ${mkWhere(pf, pt).sql}`).all(...mkWhere(pf, pt).vals);
+      let prevIncome = 0, prevExpense = 0, prevRefund = 0;
+      for (const r of prevRows) {
+        if (r.flow_type === 'income') prevIncome += r.amount;
+        else if (r.flow_type === 'expense') prevExpense += r.amount;
+        else if (r.flow_type === 'refund') prevRefund += r.amount;
+      }
+      const pctChange = (cur, prev) => (prev > 0 ? Math.round(((cur - prev) / prev) * 100) : null);
+
+      // ---- 名称映射 ----
+      const catRows = db.prepare('SELECT id,name,parent_id FROM category').all();
+      const catInfo = new Map(catRows.map((c) => [c.id, c]));
+      const memberRows = db.prepare('SELECT id,name FROM member').all();
+      const memberName = new Map(memberRows.map((m) => [m.id, m.name]));
+      const accRows = db.prepare('SELECT id,name FROM account').all();
+      const accName = new Map(accRows.map((a) => [a.id, a.name]));
+
+      // 支出构成：聚合到一级，附二级明细（下钻用）
+      const parentSum = {}, subMap = {};
+      for (const [cid, amount] of Object.entries(catSum)) {
+        const c = catInfo.get(cid);
+        const pid = c?.parent_id || cid;
+        parentSum[pid] = (parentSum[pid] || 0) + amount;
+        if (c?.parent_id) {
+          if (!subMap[pid]) subMap[pid] = [];
+          const found = subMap[pid].find((s) => s.categoryId === cid);
+          if (found) found.amount += amount;
+          else subMap[pid].push({ categoryId: cid, name: c.name, amount });
+        }
+      }
+      const compTotal = compType === 'income' ? income : expense;
+      const byCategory = Object.entries(parentSum)
+        .map(([pid, amount]) => ({
+          categoryId: pid,
+          name: catInfo.get(pid)?.name || '未分类',
+          amount,
+          pct: compTotal > 0 ? Math.round((amount / compTotal) * 100) : 0,
+          subs: (subMap[pid] || []).sort((a, b) => b.amount - a.amount)
+            .map((s) => ({ ...s, pct: amount > 0 ? Math.round((s.amount / amount) * 100) : 0 })),
+        }))
+        .sort((a, b) => b.amount - a.amount);
+
+      const byMember = Object.entries(memberSum)
+        .map(([mid, amount]) => ({ memberId: mid, name: memberName.get(mid) || '未知成员', amount, pct: compTotal > 0 ? Math.round((amount / compTotal) * 100) : 0 }))
+        .sort((a, b) => b.amount - a.amount);
+      const byAccount = Object.entries(accSum)
+        .map(([aid, amount]) => ({ accountId: aid, name: accName.get(aid) || '未知账户', amount, pct: compTotal > 0 ? Math.round((amount / compTotal) * 100) : 0 }))
+        .sort((a, b) => b.amount - a.amount);
+
+      const byMonth = Object.values(monthMap)
+        .map((m) => ({ ...m, netExpense: m.expense - m.refund }))
+        .sort((a, b) => a.month.localeCompare(b.month));
+
+      // ---- 流水明细分页 ----
+      const total = rows.length;
+      const entryRows = db.prepare(`SELECT * FROM entry WHERE ${wsql} ORDER BY entry_date DESC, created_at DESC LIMIT ? OFFSET ?`).all(...wvals, pageSize, (page - 1) * pageSize);
+      const entries = entryRows.map(decorateEntry);
+
+      return {
+        range: { from, to, days: rangeDays },
+        summary: {
+          income, expense, refund, netExpense, balance: income - netExpense,
+          count: total,
+          dailyAvg: Math.round(netExpense / rangeDays),
+          prevIncome, prevExpense,
+          incomeChange: pctChange(income, prevIncome),
+          expenseChange: pctChange(expense - refund, prevExpense - prevRefund),
+        },
+        byCategory, byMember, byAccount, byMonth,
+        entries: { items: entries, page, pageSize, total, hasMore: page * pageSize < total },
+      };
+    },
 
     // ---- 设置 ----
     'GET /api/settings': (_b, _p, req) => {
