@@ -88,7 +88,7 @@ category: id, type('expense'|'income'), parent_id, name, icon, is_frequent, sort
 
 ```powershell
 # 后端（端口 18099，数据在 .devdb/sinong.db）
-node app/server/server.js --port 18099 --data-dir .devdb
+node app/server/server.js --port 18099 --data-dir .devdb --dev-user "u1:开发测试"
 
 # 前端（端口 5173，代理到 18099）
 cd frontend; npm run dev
@@ -96,9 +96,14 @@ cd frontend; npm run dev
 
 或直接双击 `dev-restart.bat`。
 
+> **中文 dev-user 的坑**：Node/程序本身完全支持中文名；挂的是 **bat 文件编码**——cmd 默认 GBK 代码页会把 UTF-8 保存的中文读成乱码（`开发测试`→`寮€鍙戞祴璇?`）。
+> 解决：bat **顶层**（@echo off 之后、任何含中文的行之前）必须先 `chcp 65001 >nul`，且文件必须保存为 **UTF-8**（不能存 ANSI/GBK）。只在 `start "..." cmd /k "chcp 65001 && ..."` 的子命令串里放 chcp 没用——父窗口解析 start 那一行时还是 GBK，中文在传下去之前就已经乱了（踩过）。
+> dev.bat / dev-backend.bat / dev-restart.bat 已内置顶层 chcp 65001，名字默认 `u1:开发测试`，双击即可。
+> 注意 curl 模拟家人时只带 `x-trim-userid` 不带 `x-trim-username`，名字会被回写成 uid——不是 bug，是模拟姿势问题。
+
 ## 当前版本
 
-**v1.2.5** - 报表页全面改版（成员/分类/账户/类型/时间多维筛选 + 流水明细 + 构成下钻 + 成员与账户占比 + 月/年/自定义区间）
+**v1.2.6** - 管理员功能（账本/账户找回、移交管理员）+ 隐私权限收口 + 账户编辑统一组件 + --dev-user 模拟用户；导入去重（与库内已有流水比对）与导入批次、金额符号归一化（负数支出→退款、负数转账/借贷反转并提醒）、转账降级为单边记账、修复账单退款被记成支出导致欠款虚增
 
 > 版本号两处维护（真机进程读不到 manifest，运行时展示不依赖它）：
 > - 程序内唯一来源：`app/server/version.js` 的 VERSION（侧栏/settings API/MCP serverInfo 显示）

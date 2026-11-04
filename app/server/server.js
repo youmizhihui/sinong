@@ -155,6 +155,24 @@ function resolveDataDir() {
 }
 const DATA_DIR = resolveDataDir();
 
+// 本地开发模拟用户：--dev-user "uid:名称"（或环境变量 SINONG_DEV_USER）。
+// 仅用于本地调试（无 TRIM_APPNAME，读不到飞牛网关身份）时充当无身份头请求的兜底，
+// 可用 curl -H "x-trim-userid: u2" 模拟其他家人。生产环境不解析、不生效；
+// 程序内不存在任何写死的身份（历史上的 local-user 兜底已移除，遗留数据由迁移回填回收）
+const DEV_USER = (() => {
+  const raw = argVal('dev-user', null) || process.env.SINONG_DEV_USER || '';
+  if (!raw) return null;
+  const i = raw.indexOf(':');
+  const uid = i >= 0 ? raw.slice(0, i).trim() : raw.trim();
+  const name = i >= 0 ? raw.slice(i + 1).trim() : '';
+  return uid ? { uid, name: name || uid } : null;
+})();
+// 本地调试必须显式指定模拟用户，避免隐式兜底身份（快失败，不留悬空身份）
+if (!process.env.TRIM_APPNAME && !DEV_USER) {
+  console.error('[sinong] 本地开发请用 --dev-user "uid:名称" 指定模拟用户（如 --dev-user "u1:A"）；生产环境由飞牛网关注入身份，无需此参数');
+  process.exit(1);
+}
+
 // 老数据迁移：TRIM_PKGVAR/sinong.db → DATA_DIR/sinong.db
 function migrateOldData() {
   const pkgVar = process.env.TRIM_PKGVAR;
@@ -263,7 +281,6 @@ function parseJson(res, body, cb) {
   return true;
 }
 
-/** 可信用户身份：网关头优先（本地调试回退 local-user；生产环境无身份返回 null） */
 /** 还原被 Node 按 latin1 解码的请求头中文（X-Trim-Username 等非 ASCII 头值） */
 function fixHeaderText(s) {
   if (!s) return s;
@@ -275,12 +292,62 @@ function fixHeaderText(s) {
   }
 }
 
+/**
+ * 可信用户身份：飞牛网关注入的请求头（X-Trim-Userid / X-Trim-Username）。
+ * 生产（TRIM_APPNAME 存在）：必须有网关头，否则返回 null（入口层 401）。
+ * 本地开发（无 TRIM_APPNAME）：优先取请求头（curl 可模拟任意家人），
+ *   无头时回退到 --dev-user 指定的模拟用户；两者都没有返回 null。
+ * 程序内不认识任何写死身份。
+ */
 function getUser(req) {
   const uid = req.headers['x-trim-userid'];
   const name = fixHeaderText(req.headers['x-trim-username']);
-  // 生产环境（飞牛网关）必须有可信身份；本地调试（无 TRIM_APPNAME）回退 local-user
-  if (!uid && process.env.TRIM_APPNAME) return null;
-  return { uid: uid || 'local-user', name: name || uid || 'local-user' };
+  if (uid) return { uid, name: name || uid };
+  if (process.env.TRIM_APPNAME) return null;
+  return DEV_USER ? { uid: DEV_USER.uid, name: DEV_USER.name } : null;
+}
+
+// ==================== 管理员 ====================
+/**
+ * 管理员判定：库里最早进入的真实用户（与 db.js 迁移回填 REAL_UID 同口径，
+ * 排除历史开发占位身份），无主数据迁移时已统一归属给他。
+ * 管理员界面可移交：落库 setting.admin_uid 覆盖值，优先于自动判定。
+ */
+function getAdminUid() {
+  const db = getDb();
+  const ov = db.prepare("SELECT value FROM setting WHERE key='admin_uid'").get();
+  if (ov && ov.value && ov.value !== '') return ov.value;
+  const row = db.prepare(`
+    SELECT COALESCE(
+      (SELECT m.fnos_uid FROM member m JOIN app_user a ON a.uid = m.fnos_uid
+         WHERE m.relation = 'self' AND m.fnos_uid NOT IN ('', 'local-user')
+         ORDER BY m.created_at, m.id LIMIT 1),
+      (SELECT m.fnos_uid FROM member m
+         WHERE m.relation = 'self' AND m.fnos_uid NOT IN ('', 'local-user')
+         ORDER BY m.created_at, m.id LIMIT 1),
+      (SELECT uid FROM app_user WHERE uid NOT IN ('', 'local-user') ORDER BY last_seen ASC LIMIT 1)
+    ) AS uid
+  `).get();
+  return row ? row.uid : null;
+}
+
+function isAdminUid(uid) {
+  return !!uid && uid === getAdminUid();
+}
+
+/** 管理员专属接口的守卫 */
+function requireAdmin(req) {
+  const u = getUser(req);
+  if (!u || !isAdminUid(u.uid)) throw httpError(403, '仅管理员可操作');
+  return u;
+}
+
+/** 分配归属的目标用户必须真实存在（app_user = 登录过的用户，本地开发的模拟用户同样有效） */
+function requireKnownUser(ownerUid) {
+  if (!ownerUid) throw httpError(400, '目标用户无效');
+  const u = getDb().prepare('SELECT uid FROM app_user WHERE uid=?').get(ownerUid);
+  if (!u) throw httpError(400, '目标用户不存在（需先打开过一次司农记账）');
+  return ownerUid;
 }
 
 /** 校验当前用户是否有权访问指定账本 */
@@ -303,6 +370,8 @@ function requireLedgerAccess(uid, ledgerId) {
 function requireLedgerOwner(uid, ledgerId, action = '管理成员') {
   const l = getDb().prepare('SELECT owner_uid FROM ledger WHERE id=?').get(ledgerId);
   if (!l) throw httpError(404, '账本不存在');
+  // 管理员是全库账本的找回与管理者，成员/类型/删除等管理操作放行
+  if (isAdminUid(uid)) return l;
   if (!l.owner_uid) { requireLedgerAccess(uid, ledgerId); return l; }
   if (l.owner_uid !== uid) throw httpError(403, `只有账本所有者可以${action}`);
   return l;
@@ -311,8 +380,11 @@ function requireLedgerOwner(uid, ledgerId, action = '管理成员') {
 /**
  * 账户可见性校验：共享账户所有人可见；私有账户只有归属人可见。
  * owner_uid 为空的历史私有账户（迁移回填前的遗留）不做拦截，避免误伤本人。
+ * 管理员可在管理界面处理所有账户（找回归属、改账单日等），放行；
+ * 流水数据仍按账本权限走，不因管理员身份放开。
  */
 function assertAccountVisible(acc, user) {
+  if (isAdminUid(user.uid)) return;
   if (acc.is_private && acc.owner_uid && acc.owner_uid !== user.uid) {
     throw httpError(403, '无权访问该私有账户');
   }
@@ -325,6 +397,8 @@ function assertAccountVisible(acc, user) {
  * 无主的历史共享账户（owner_uid 为空，如种子「现金」）视为公用账户，不归任何人。
  */
 function canManageAccount(acc, user) {
+  // 管理员拥有全库账户的最高管理权（找回归属、删除等）
+  if (isAdminUid(user.uid)) return true;
   if (acc.is_private) return acc.owner_uid === user.uid;
   return !!acc.owner_uid && acc.owner_uid === user.uid;
 }
@@ -341,13 +415,17 @@ function assertAccountManageable(acc, user) {
 /**
  * 无主共享账户认领：种子「现金」账户建于 migrate 之后（建库时还没有用户），
  * 早期版本也不写归属，这类账户没有创建者就没法改归属/删除。
- * 与默认账本同口径——首个访问者认领，已认领的不再变动。
+ * 统一认给管理员（最早进入的用户），与迁移回填同口径，而不是随首个访问者漂移。
  */
-function claimOrphanAccounts(uid) {
-  if (!uid) return;
+function claimOrphanAccounts(fallbackUid) {
+  // 管理员（最早进入的用户）认领；库内还没有任何用户时（全新库/本地开发首访）退回当前身份，
+  // 之后再来的真实用户不会抢走
+  const admin = getAdminUid() || fallbackUid;
+  if (!admin) return;
+  // 运行时只认领真正无主（NULL/''）的账户；历史遗留的占位归属由启动时 migrate 统一回填纠正
   getDb().prepare(
-    "UPDATE account SET owner_uid=? WHERE is_private=0 AND (owner_uid IS NULL OR owner_uid='' OR owner_uid='local-user')"
-  ).run(uid);
+    "UPDATE account SET owner_uid=? WHERE is_private=0 AND (owner_uid IS NULL OR owner_uid='')"
+  ).run(admin);
 }
 
 /** 当前账本类型：shared 或 private。无当前账本时默认 private */
@@ -512,7 +590,7 @@ function addDaysStr(dateStr, n) {
 /** 成员 self 懒创建：当前用户自动映射成员；用户无账本时自动创建私有日常账本 */
 function ensureSelfMember(user) {
   const db = getDb();
-  const uid = user.uid || 'local-user';
+  const uid = user.uid;
   let m = db.prepare('SELECT * FROM member WHERE fnos_uid = ?').get(uid);
   if (!m) {
     const id = genId('mem');
@@ -528,10 +606,10 @@ function ensureSelfMember(user) {
       m.name = fixed;
     }
   }
-  // 种子账本建库时还没有用户身份，owner_uid 是空的；首个访问者认领它。
-  // 早期本地调试留下的 local-user 归属同样视为无主（那个身份不会再登录）。
-  // 否则无主账本对所有人 open（能改类型/删账本），共享隔离形同虚设
-  db.prepare("UPDATE ledger SET owner_uid=? WHERE is_default=1 AND (owner_uid IS NULL OR owner_uid='' OR owner_uid='local-user')").run(uid);
+  // 种子账本建库时还没有用户身份，owner_uid 是空的；统一认给管理员（最早进入的用户）。
+  // 运行时只认领真正无主（NULL/''）的账本；历史遗留的占位归属由启动时 migrate 回填纠正
+  const adminUid = getAdminUid() || uid;
+  db.prepare("UPDATE ledger SET owner_uid=? WHERE is_default=1 AND (owner_uid IS NULL OR owner_uid='')").run(adminUid);
   // 账户同理：种子的「现金」账户没有创建者
   claimOrphanAccounts(uid);
   // 用户无任何可见账本时，自动创建一个私有日常账本
@@ -1137,7 +1215,7 @@ function createRouter(user) {
         // isOwner：能否管理成员/改类型/删除。无主的历史账本视为可管理（与接口层放行一致）
         return { ...l, entryCount: n, members, ownerName: owner ? owner.name : '', isOwner: !l.owner_uid || l.owner_uid === u.uid };
       });
-      return { ledgers, currentLedgerId: cur ? cur.value : (ls[0] ? ls[0].id : null) };
+      return { ledgers, currentLedgerId: cur ? cur.value : (ls[0] ? ls[0].id : null), isAdmin: isAdminUid(u.uid) };
     },
     'POST /api/ledgers': async (body, _p, req) => {
       const u = getUser(req);
@@ -1174,10 +1252,10 @@ function createRouter(user) {
       const l = db.prepare('SELECT * FROM ledger WHERE id=?').get(p.id);
       if (!l) throw httpError(404, '账本不存在');
       const user = getUser(req);
-      // 只有 owner 能修改账本类型。
+      // 只有 owner 能修改账本类型（管理员可越权，用于找回/纠偏）。
       // owner_uid 为空的是历史账本（该列是后加的），没有归属可校验：放行，并在转私有时由操作者认领，
       // 否则这类账本谁都改不了类型，转私有后还会因为 owner 为空而彻底不可见。
-      if (body.type !== undefined && l.owner_uid && l.owner_uid !== user.uid) {
+      if (body.type !== undefined && l.owner_uid && l.owner_uid !== user.uid && !isAdminUid(user.uid)) {
         throw httpError(403, '只有账本所有者能修改类型');
       }
       const fields = []; const vals = [];
@@ -1282,7 +1360,9 @@ function createRouter(user) {
       return updated;
     },
     'GET /api/ledgers/:id/affected-accounts': (_b, p, req) => {
-      requireLedgerAccess(getUser(req).uid, p.id);
+      // 管理员改类型前也需要看受影响账户（只返回账户名，不含流水，不违反隐私边界）
+      const _u = getUser(req);
+      if (!isAdminUid(_u.uid)) requireLedgerAccess(_u.uid, p.id);
       // 返回这个账本里用到的所有账户，以及每个账户是否在其他账本也有记录
       const accs = db.prepare(`
         SELECT DISTINCT a.id, a.name, a.is_private FROM account a
@@ -1483,17 +1563,18 @@ function createRouter(user) {
       if (!file) throw httpError(400, '缺少文件字段 file');
       const parsed = parseWorkbook(file.body);
       const token = genId('imp');
-      importCache.set(token, parsed);
+      importCache.set(token, { parsed, fileName: file.filename || '' });
       setTimeout(() => importCache.delete(token), 5 * 60 * 1000);
       // 返回预览摘要（不含 _parsed 原始数据）
       const { _parsed, ...summary } = parsed;
-      return { token, ...summary };
+      return { token, fileName: file.filename || '', ...summary };
     },
     'POST /api/import': async (body, _p, req) => {
       const { token, ledgerId } = body || {};
-      const parsed = importCache.get(token);
-      if (!parsed) throw httpError(400, '预览已过期，请重新上传');
+      const cached = importCache.get(token);
+      if (!cached) throw httpError(400, '预览已过期，请重新上传');
       importCache.delete(token);
+      const parsed = cached.parsed;
       const user = getUser(req);
       let lid = ledgerId || (db.prepare('SELECT value FROM setting WHERE key=?').get('current_ledger')?.value) || '';
       // 兜底：没有当前账本时选第一个可见账本
@@ -1505,8 +1586,8 @@ function createRouter(user) {
         if (first) lid = first.id;
       }
       if (!lid) throw httpError(400, '没有可用的账本，请先创建账本');
-      const r = doImport(parsed, lid, user.uid);
-      return { ok: true, created: r.created, ledgerId: lid };
+      const r = doImport(parsed, lid, user.uid, cached.fileName);
+      return { ok: true, created: r.created, skippedDup: r.skippedDup, droppedTransfer: r.droppedTransfer, batchId: r.batchId, ledgerId: lid };
     },
     // ---- AI 导入格式识别 ----
     'GET /api/ai/config': () => {
@@ -1952,7 +2033,7 @@ function createRouter(user) {
       const pageSize = Math.min(Math.max(parseInt(u.searchParams.get('pageSize') || '50', 10), 1), 200);
 
       // 自己的 member id：member_id 为空的记录视为自己
-      const selfMember = db.prepare('SELECT id FROM member WHERE fnos_uid=? AND relation=?').get(user.uid || 'local-user', 'self');
+      const selfMember = db.prepare('SELECT id FROM member WHERE fnos_uid=? AND relation=?').get(user.uid, 'self');
       const selfMemberId = selfMember?.id || null;
 
       // 分类多选展开：所选一级自动并入其全部二级
@@ -1986,10 +2067,10 @@ function createRouter(user) {
       const rows = db.prepare(`SELECT flow_type, amount, category_id, member_id, account_id, entry_date FROM entry WHERE ${wsql} ORDER BY entry_date DESC, created_at DESC`).all(...wvals);
 
       // ---- 汇总 + 各维度聚合（基于全部命中行，不受分页影响）----
-      // 构成/占比跟随筛选类型：选「收入」时按收入聚合，其余（支出/全部）按支出聚合
-      const compType = type === 'income' ? 'income' : 'expense';
+      // 构成/占比按收支类型分开聚合：类型筛「收入」展示收入组，其余展示支出组；
+      // 「全部」时两组一起返回（byCategoryIncome / byMemberIncome / byAccountIncome），前端两节都显示
       let income = 0, expense = 0, refund = 0;
-      const catSum = {}, memberSum = {}, accSum = {}, monthMap = {};
+      const catSum = { income: {}, expense: {} }, memberSum = { income: {}, expense: {} }, accSum = { income: {}, expense: {} }, monthMap = {};
       for (const r of rows) {
         if (r.flow_type === 'income') {
           income += r.amount;
@@ -1998,11 +2079,12 @@ function createRouter(user) {
         } else if (r.flow_type === 'refund') {
           refund += r.amount;
         }
-        if (r.flow_type === compType) {
-          if (r.category_id) catSum[r.category_id] = (catSum[r.category_id] || 0) + r.amount;
+        if (r.flow_type === 'income' || r.flow_type === 'expense') {
+          const t = r.flow_type;
+          if (r.category_id) catSum[t][r.category_id] = (catSum[t][r.category_id] || 0) + r.amount;
           const mk = r.member_id || selfMemberId;
-          if (mk) memberSum[mk] = (memberSum[mk] || 0) + r.amount;
-          if (r.account_id) accSum[r.account_id] = (accSum[r.account_id] || 0) + r.amount;
+          if (mk) memberSum[t][mk] = (memberSum[t][mk] || 0) + r.amount;
+          if (r.account_id) accSum[t][r.account_id] = (accSum[t][r.account_id] || 0) + r.amount;
         }
         const mk = r.entry_date.slice(0, 7);
         if (!monthMap[mk]) monthMap[mk] = { month: mk, income: 0, expense: 0, refund: 0 };
@@ -2039,37 +2121,47 @@ function createRouter(user) {
       const accRows = db.prepare('SELECT id,name FROM account').all();
       const accName = new Map(accRows.map((a) => [a.id, a.name]));
 
-      // 支出构成：聚合到一级，附二级明细（下钻用）
-      const parentSum = {}, subMap = {};
-      for (const [cid, amount] of Object.entries(catSum)) {
-        const c = catInfo.get(cid);
-        const pid = c?.parent_id || cid;
-        parentSum[pid] = (parentSum[pid] || 0) + amount;
-        if (c?.parent_id) {
-          if (!subMap[pid]) subMap[pid] = [];
-          const found = subMap[pid].find((s) => s.categoryId === cid);
-          if (found) found.amount += amount;
-          else subMap[pid].push({ categoryId: cid, name: c.name, amount });
+      // 构成/占比聚合为通用构建器：sum 为 {id: amount}，total 为该口径的总额（百分比分母）
+      const buildByCategory = (sum, total) => {
+        const parentSum = {}, subMap = {};
+        for (const [cid, amount] of Object.entries(sum)) {
+          const c = catInfo.get(cid);
+          const pid = c?.parent_id || cid;
+          parentSum[pid] = (parentSum[pid] || 0) + amount;
+          if (c?.parent_id) {
+            if (!subMap[pid]) subMap[pid] = [];
+            const found = subMap[pid].find((s) => s.categoryId === cid);
+            if (found) found.amount += amount;
+            else subMap[pid].push({ categoryId: cid, name: c.name, amount });
+          }
         }
-      }
-      const compTotal = compType === 'income' ? income : expense;
-      const byCategory = Object.entries(parentSum)
-        .map(([pid, amount]) => ({
-          categoryId: pid,
-          name: catInfo.get(pid)?.name || '未分类',
-          amount,
-          pct: compTotal > 0 ? Math.round((amount / compTotal) * 100) : 0,
-          subs: (subMap[pid] || []).sort((a, b) => b.amount - a.amount)
-            .map((s) => ({ ...s, pct: amount > 0 ? Math.round((s.amount / amount) * 100) : 0 })),
-        }))
+        return Object.entries(parentSum)
+          .map(([pid, amount]) => ({
+            categoryId: pid,
+            name: catInfo.get(pid)?.name || '未分类',
+            amount,
+            pct: total > 0 ? Math.round((amount / total) * 100) : 0,
+            subs: (subMap[pid] || []).sort((a, b) => b.amount - a.amount)
+              .map((s) => ({ ...s, pct: amount > 0 ? Math.round((s.amount / amount) * 100) : 0 })),
+          }))
+          .sort((a, b) => b.amount - a.amount);
+      };
+      const buildByMember = (sum, total) => Object.entries(sum)
+        .map(([mid, amount]) => ({ id: mid, name: memberName.get(mid) || '未知成员', amount, pct: total > 0 ? Math.round((amount / total) * 100) : 0 }))
+        .sort((a, b) => b.amount - a.amount);
+      const buildByAccount = (sum, total) => Object.entries(sum)
+        .map(([aid, amount]) => ({ id: aid, name: accName.get(aid) || '未知账户', amount, pct: total > 0 ? Math.round((amount / total) * 100) : 0 }))
         .sort((a, b) => b.amount - a.amount);
 
-      const byMember = Object.entries(memberSum)
-        .map(([mid, amount]) => ({ memberId: mid, name: memberName.get(mid) || '未知成员', amount, pct: compTotal > 0 ? Math.round((amount / compTotal) * 100) : 0 }))
-        .sort((a, b) => b.amount - a.amount);
-      const byAccount = Object.entries(accSum)
-        .map(([aid, amount]) => ({ accountId: aid, name: accName.get(aid) || '未知账户', amount, pct: compTotal > 0 ? Math.round((amount / compTotal) * 100) : 0 }))
-        .sort((a, b) => b.amount - a.amount);
+      // 支出组为主口径（类型筛「收入」时主口径为收入组）；「全部」时额外带收入组
+      const mainType = type === 'income' ? 'income' : 'expense';
+      const mainTotal = mainType === 'income' ? income : expense;
+      const byCategory = buildByCategory(catSum[mainType], mainTotal);
+      const byMember = buildByMember(memberSum[mainType], mainTotal);
+      const byAccount = buildByAccount(accSum[mainType], mainTotal);
+      const byCategoryIncome = type === 'all' ? buildByCategory(catSum.income, income) : undefined;
+      const byMemberIncome = type === 'all' ? buildByMember(memberSum.income, income) : undefined;
+      const byAccountIncome = type === 'all' ? buildByAccount(accSum.income, income) : undefined;
 
       const byMonth = Object.values(monthMap)
         .map((m) => ({ ...m, netExpense: m.expense - m.refund }))
@@ -2090,9 +2182,67 @@ function createRouter(user) {
           incomeChange: pctChange(income, prevIncome),
           expenseChange: pctChange(expense - refund, prevExpense - prevRefund),
         },
-        byCategory, byMember, byAccount, byMonth,
+        byCategory, byMember, byAccount, byCategoryIncome, byMemberIncome, byAccountIncome, byMonth,
         entries: { items: entries, page, pageSize, total, hasMore: page * pageSize < total },
       };
+    },
+
+    // ---- 管理员 ----
+    'GET /api/admin/ledgers': (_b, _p, req) => {
+      requireAdmin(req);
+      const nameOf = (uid) => {
+        if (!uid) return '';
+        if (uid === '*') return '所有人';
+        const m = db.prepare('SELECT name FROM member WHERE fnos_uid=? LIMIT 1').get(uid);
+        return m ? m.name : uid;
+      };
+      const ledgers = db.prepare('SELECT * FROM ledger ORDER BY is_default DESC, created_at').all().map((l) => ({
+        id: l.id, name: l.name, icon: l.icon, type: l.type, is_default: l.is_default,
+        owner_uid: l.owner_uid, ownerName: nameOf(l.owner_uid),
+        entryCount: db.prepare('SELECT COUNT(*) AS n FROM entry WHERE ledger_id=?').get(l.id).n,
+        memberNames: db.prepare('SELECT user_id FROM ledger_share WHERE ledger_id=?').all(l.id).map((s) => nameOf(s.user_id)),
+      }));
+      return { ledgers };
+    },
+    'GET /api/admin/accounts': (_b, _p, req) => {
+      requireAdmin(req);
+      const bals = computeBalances();
+      const accounts = db.prepare('SELECT * FROM account ORDER BY is_private, sort, created_at').all().map((a) => {
+        const owner = a.owner_uid ? db.prepare('SELECT name FROM member WHERE fnos_uid=? LIMIT 1').get(a.owner_uid) : null;
+        return {
+          id: a.id, name: a.name, type: a.type, is_private: a.is_private,
+          owner_uid: a.owner_uid, ownerName: owner ? owner.name : '',
+          balance: a.balance, currentBalance: (a.balance || 0) + (bals.get(a.id) || 0),
+        };
+      });
+      return { accounts };
+    },
+    'PUT /api/admin/ledgers/:id/owner': (body, p, req) => {
+      const admin = requireAdmin(req);
+      const l = db.prepare('SELECT * FROM ledger WHERE id=?').get(p.id);
+      if (!l) throw httpError(404, '账本不存在');
+      const ownerUid = requireKnownUser(body.ownerUid);
+      db.prepare('UPDATE ledger SET owner_uid=? WHERE id=?').run(ownerUid, p.id);
+      // 共享账本的新 owner 必须在成员表里，否则分给他也看不见
+      if (l.type === 'shared') {
+        db.prepare('INSERT OR IGNORE INTO ledger_share (ledger_id,user_id,perm) VALUES (?,?,?)').run(p.id, ownerUid, 'admin');
+      }
+      return { ok: true };
+    },
+    'PUT /api/admin/accounts/:id/owner': (body, p, req) => {
+      const admin = requireAdmin(req);
+      const a = db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
+      if (!a) throw httpError(404, '账户不存在');
+      const ownerUid = requireKnownUser(body.ownerUid);
+      db.prepare('UPDATE account SET owner_uid=?, updated_at=? WHERE id=?').run(ownerUid, nowIso(), p.id);
+      return { ok: true };
+    },
+    'PUT /api/admin/transfer': (body, _p, req) => {
+      const admin = requireAdmin(req);
+      const ownerUid = requireKnownUser(body.ownerUid);
+      // 移交后判定基准切换为落库覆盖值，原管理员退回普通用户
+      db.prepare('INSERT OR REPLACE INTO setting (key,value) VALUES (?,?)').run('admin_uid', ownerUid);
+      return { ok: true };
     },
 
     // ---- 设置 ----
@@ -2101,7 +2251,7 @@ function createRouter(user) {
       // 首次访问时创建 self 成员 + 属于用户的私有日常账本
       ensureSelfMember(user);
       const rows = db.prepare('SELECT key,value FROM setting').all();
-      const out = { currentLedgerId: null, hideAmount: false, version: APP_VERSION };
+      const out = { currentLedgerId: null, hideAmount: false, version: APP_VERSION, isAdmin: isAdminUid(user.uid) };
       for (const r of rows) {
         if (r.key === 'current_ledger') out.currentLedgerId = r.value;
         else if (r.key === 'hide_amount') out.hideAmount = r.value === '1';

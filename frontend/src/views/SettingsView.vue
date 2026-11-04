@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: 'SettingsView' })
-import { Settings as SettingsIcon, Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag, Plug, Copy, RefreshCw, MessageCircle } from 'lucide-vue-next'
+import { Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag, Plug, Copy, RefreshCw, MessageCircle, ShieldCheck, AlertTriangle } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ref } from 'vue'
 import { api, type ImportPreview, type AiConfig } from '../api'
@@ -12,7 +12,6 @@ const FEEDBACK_URL = 'https://feedback.youmizhihui.com/'
 function openFeedback() {
   window.open(FEEDBACK_URL, '_blank')
 }
-const saving = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const importing = ref(false)
 const preview = ref<ImportPreview | null>(null)
@@ -209,12 +208,6 @@ async function aiAnalyze() {
   }
 }
 
-async function toggleHide() {
-  store.settings.hideAmount = !store.settings.hideAmount
-  saving.value = true
-  try { await api.put('settings', { hideAmount: store.settings.hideAmount }) } finally { saving.value = false }
-}
-
 function pickFile() { fileInput.value?.click() }
 
 async function exportData() {
@@ -261,14 +254,17 @@ async function confirmImport() {
   try {
     await showConfirmDialog({
       title: '确认导入',
-      message: `将导入 ${preview.value.total} 条记录（支出${preview.value.expenseCount} / 收入${preview.value.incomeCount} / 转账${preview.value.transferCount}），自动创建 ${preview.value.newAccounts.length} 个新账户、${preview.value.newCategories.length} 个新分类、${preview.value.newMembers.length} 个新成员。`,
+      message: `将导入 ${preview.value.total} 条记录（支出${preview.value.expenseCount} / 收入${preview.value.incomeCount} / 转账${preview.value.transferCount}${preview.value.refundCount ? ` / 退款${preview.value.refundCount}` : ''}），自动创建 ${preview.value.newAccounts.length} 个新账户、${preview.value.newCategories.length} 个新分类、${preview.value.newMembers.length} 个新成员。与库中已有流水完全相同的会自动跳过。`,
       confirmButtonText: '开始导入',
     })
   } catch { return }
   importing.value = true
   try {
-    const r = await api.post<{ created: number }>('import', { token: preview.value.token, ledgerId: store.settings.currentLedgerId || undefined })
-    showToast(`已导入 ${r.created} 条`)
+    const r = await api.post<{ created: number; skippedDup?: number; droppedTransfer?: number }>('import', { token: preview.value.token, ledgerId: store.settings.currentLedgerId || undefined })
+    const parts = [`导入 ${r.created} 条`]
+    if (r.skippedDup) parts.push(`跳过 ${r.skippedDup} 条（与已有流水重复）`)
+    if (r.droppedTransfer) parts.push(`${r.droppedTransfer} 条转账降级为单边记账`)
+    showToast(parts.join('，'))
     store.homeDirty = true
     preview.value = null
     uploadedFile.value = null
@@ -285,16 +281,6 @@ async function confirmImport() {
   <div class="page">
     <div class="page-title">设置</div>
     <div class="card">
-      <div class="row" style="cursor: pointer;" @click="toggleHide">
-        <span class="icon-badge"><SettingsIcon :size="18" /></span>
-        <div class="row-main">
-          <div class="row-title">金额显隐</div>
-          <div class="muted">{{ store.settings.hideAmount ? '已隐藏（点击显示）' : '显示金额（点击隐藏）' }}</div>
-        </div>
-        <span class="muted">{{ saving ? '保存中…' : '' }}</span>
-      </div>
-    </div>
-    <div class="card" style="margin-top: 12px;">
       <div class="row" style="cursor: pointer;" @click="router.push('/members')">
         <span class="icon-badge"><Users :size="18" /></span>
         <div class="row-main">
@@ -332,6 +318,14 @@ async function confirmImport() {
         <div class="row-main">
           <div class="row-title">周期账</div>
           <div class="muted">房租工资等固定收支自动记账</div>
+        </div>
+        <span class="muted">›</span>
+      </div>
+      <div v-if="store.settings.isAdmin" class="row" style="cursor: pointer;" @click="router.push('/admin')">
+        <span class="icon-badge admin-badge"><ShieldCheck :size="18" /></span>
+        <div class="row-main">
+          <div class="row-title">管理员功能</div>
+          <div class="muted">账本/账户找回、移交管理员</div>
         </div>
         <span class="muted">›</span>
       </div>
@@ -399,7 +393,7 @@ async function confirmImport() {
           <span v-if="preview?.newMembers.length" class="new-chip">新成员 {{ preview.newMembers.length }}</span>
         </div>
         <div v-if="preview?.warnings.length" class="import-warn">
-          <div v-for="(w, i) in preview.warnings" :key="i" class="warn-item">⚠ {{ w }}</div>
+          <div v-for="(w, i) in preview.warnings" :key="i" class="warn-item"><AlertTriangle :size="14" /> {{ w }}</div>
         </div>
         <div class="ai-bar">
           <button class="ai-btn" :disabled="aiAnalyzing || importing" @click="aiAnalyze">
@@ -515,6 +509,7 @@ async function confirmImport() {
 </template>
 
 <style scoped>
+.admin-badge { background: #FFF7E6; color: #D48806; }
 .pop-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 16px 18px 12px; border-bottom: 1px solid var(--border);

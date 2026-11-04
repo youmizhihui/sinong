@@ -26,6 +26,10 @@ interface QueryResult {
   byCategory: CatAgg[]
   byMember: NameAgg[]
   byAccount: NameAgg[]
+  /** 类型筛「全部」时额外返回的收入口径组，其余类型不返回 */
+  byCategoryIncome?: CatAgg[]
+  byMemberIncome?: NameAgg[]
+  byAccountIncome?: NameAgg[]
   byMonth: { month: string; income: number; expense: number; refund: number; netExpense: number }[]
   entries: { items: QueryEntry[]; page: number; pageSize: number; total: number; hasMore: boolean }
 }
@@ -233,6 +237,36 @@ onMounted(async () => {
 interface Trend { month: string; income: number; expense: number; netExpense: number }
 const trend = ref<Trend[]>([])
 const compName = computed(() => (flowType.value === 'income' ? '收入构成' : '支出构成'))
+/** 构成分节：类型筛「全部」时支出、收入两组都显示，其余只显示对应口径一组 */
+const compSections = computed<{ key: 'expense' | 'income'; title: string; list: CatAgg[] }[]>(() => {
+  if (flowType.value === 'all') {
+    return [
+      { key: 'expense', title: '支出构成', list: data.value?.byCategory || [] },
+      { key: 'income', title: '收入构成', list: data.value?.byCategoryIncome || [] },
+    ]
+  }
+  return [{ key: flowType.value === 'income' ? 'income' : 'expense', title: compName.value, list: data.value?.byCategory || [] }]
+})
+const memberSections = computed<{ title: string; list: NameAgg[] }[]>(() => {
+  const kindLabel = flowType.value === 'income' ? '收入' : '支出'
+  if (flowType.value === 'all') {
+    return [
+      { title: '成员支出占比', list: data.value?.byMember || [] },
+      { title: '成员收入占比', list: data.value?.byMemberIncome || [] },
+    ]
+  }
+  return [{ title: `成员${kindLabel}占比`, list: data.value?.byMember || [] }]
+})
+const accountSections = computed<{ title: string; list: NameAgg[] }[]>(() => {
+  const kindLabel = flowType.value === 'income' ? '收入' : '支出'
+  if (flowType.value === 'all') {
+    return [
+      { title: '账户支出占比', list: data.value?.byAccount || [] },
+      { title: '账户收入占比', list: data.value?.byAccountIncome || [] },
+    ]
+  }
+  return [{ title: `账户${kindLabel}占比`, list: data.value?.byAccount || [] }]
+})
 const maxTrend = computed(() => {
   const all = trend.value.length
     ? trend.value.flatMap((t) => [t.income, t.expense])
@@ -356,16 +390,16 @@ function changeText(v: number | null) {
         </div>
       </div>
 
-      <!-- 构成（支出/收入跟随筛选类型），点击展开二级 -->
-      <div class="card section">
-        <div class="sec-head"><TrendingDown :size="16" /> {{ compName }}</div>
-        <div v-if="data.byCategory.length === 0" class="muted empty">当前筛选暂无{{ flowType === 'income' ? '收入' : '支出' }}</div>
+      <!-- 构成（「全部」时支出/收入两节都显示），点击展开二级 -->
+      <div class="card section" v-for="sec in compSections" :key="sec.key">
+        <div class="sec-head"><TrendingDown :size="16" /> {{ sec.title }}</div>
+        <div v-if="sec.list.length === 0" class="muted empty">当前筛选暂无{{ sec.key === 'income' ? '收入' : '支出' }}</div>
         <div v-else class="bars">
-          <template v-for="c in data.byCategory" :key="c.categoryId">
+          <template v-for="c in sec.list" :key="c.categoryId">
             <div class="bar-row" :class="{ clickable: c.subs.length > 0 }" @click="c.subs.length && toggleExpand(c.categoryId)">
               <span class="bar-name">{{ c.name }}</span>
               <div class="bar-track">
-                <div class="bar-fill" :class="flowType === 'income' ? 'income-fill' : 'expense-fill'" :style="{ width: c.pct + '%' }" />
+                <div class="bar-fill" :class="sec.key === 'income' ? 'income-fill' : 'expense-fill'" :style="{ width: c.pct + '%' }" />
               </div>
               <span class="bar-val">{{ fmtMoney(c.amount) }}</span>
               <span class="bar-pct muted">{{ c.pct }}%</span>
@@ -374,7 +408,7 @@ function changeText(v: number | null) {
               <div v-for="s in c.subs" :key="s.categoryId" class="bar-row sub">
                 <span class="bar-name">{{ s.name }}</span>
                 <div class="bar-track">
-                  <div class="bar-fill dim" :class="flowType === 'income' ? 'income-fill' : 'expense-fill'" :style="{ width: s.pct + '%' }" />
+                  <div class="bar-fill dim" :class="sec.key === 'income' ? 'income-fill' : 'expense-fill'" :style="{ width: s.pct + '%' }" />
                 </div>
                 <span class="bar-val">{{ fmtMoney(s.amount) }}</span>
                 <span class="bar-pct muted">{{ s.pct }}%</span>
@@ -382,14 +416,14 @@ function changeText(v: number | null) {
             </template>
           </template>
         </div>
-        <div v-if="data.byCategory.some((c) => c.subs.length)" class="muted" style="font-size: 11px; margin-top: 8px;">点分类行可展开二级明细</div>
+        <div v-if="sec.list.some((c) => c.subs.length)" class="muted" style="font-size: 11px; margin-top: 8px;">点分类行可展开二级明细</div>
       </div>
 
-      <!-- 成员占比 / 账户占比 -->
-      <div class="card section" v-if="data.byMember.length > 1">
-        <div class="sec-head"><Users :size="16" /> 成员{{ flowType === 'income' ? '收入' : '支出' }}占比</div>
+      <!-- 成员占比 / 账户占比（「全部」时支出/收入两节都显示） -->
+      <div class="card section" v-for="s in memberSections.filter((x) => x.list.length > 1)" :key="s.title">
+        <div class="sec-head"><Users :size="16" /> {{ s.title }}</div>
         <div class="bars">
-          <div v-for="mem in data.byMember" :key="mem.id" class="bar-row">
+          <div v-for="mem in s.list" :key="mem.id" class="bar-row">
             <span class="bar-name">{{ mem.name }}</span>
             <div class="bar-track">
               <div class="bar-fill member-fill" :style="{ width: mem.pct + '%' }" />
@@ -399,10 +433,10 @@ function changeText(v: number | null) {
           </div>
         </div>
       </div>
-      <div class="card section" v-if="data.byAccount.length > 1">
-        <div class="sec-head"><Wallet :size="16" /> 账户{{ flowType === 'income' ? '收入' : '支出' }}占比</div>
+      <div class="card section" v-for="s in accountSections.filter((x) => x.list.length > 1)" :key="s.title">
+        <div class="sec-head"><Wallet :size="16" /> {{ s.title }}</div>
         <div class="bars">
-          <div v-for="a in data.byAccount" :key="a.id" class="bar-row">
+          <div v-for="a in s.list" :key="a.id" class="bar-row">
             <span class="bar-name">{{ a.name }}</span>
             <div class="bar-track">
               <div class="bar-fill acc-fill" :style="{ width: a.pct + '%' }" />

@@ -139,6 +139,17 @@ CREATE TABLE IF NOT EXISTS entry (
 CREATE INDEX IF NOT EXISTS idx_entry_ledger_date ON entry(ledger_id, entry_date);
 CREATE INDEX IF NOT EXISTS idx_entry_account ON entry(account_id);
 
+CREATE TABLE IF NOT EXISTS import_batch (
+  id            TEXT PRIMARY KEY,
+  ledger_id     TEXT NOT NULL,
+  file_name     TEXT,
+  total_rows    INTEGER NOT NULL DEFAULT 0,
+  created_count INTEGER NOT NULL DEFAULT 0,
+  skipped_dup   INTEGER NOT NULL DEFAULT 0,
+  created_by    TEXT,
+  created_at    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS attachment (
   id         TEXT PRIMARY KEY,
   entry_id   TEXT NOT NULL,
@@ -253,6 +264,9 @@ function migrate() {
   if (!enCols.some((c) => c.name === 'platform')) {
     db.exec('ALTER TABLE entry ADD COLUMN platform TEXT');
   }
+  if (!enCols.some((c) => c.name === 'import_batch_id')) {
+    db.exec('ALTER TABLE entry ADD COLUMN import_batch_id TEXT');
+  }
   const accCols = db.prepare('PRAGMA table_info(account)').all();
   if (!accCols.some((c) => c.name === 'is_private')) {
     db.exec('ALTER TABLE account ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0');
@@ -275,8 +289,10 @@ function migrate() {
   //   2) 共享账本：isOwner 退化为「人人可管理」，能改类型、删账本，绕过共享隔离。
   //
   // 「真实用户」候选顺序：已登录过的本人 → 最早的本人成员 → 最早登录的用户。
-  // 一律排除 local-user：它是早期本地调试用的占位身份，永远不会再登录，
-  // 归属记到它头上等于记到了黑洞里（用户的账本会显示成「不是我的」）。
+  // 排除 'local-user'：它是早期本地调试遗留的占位身份（运行期已不再产生，见 getUser 的
+  // --dev-user 机制），仅存在于旧开发库的数据里；归属记到它头上等于记到黑洞，
+  // 这里按无主垃圾统一回收给最早的真实用户。若真有用户 uid 恰好叫 local-user，
+  // 其数据会被回填给最早用户，可通过管理员功能重新分配
   const REAL_UID = `COALESCE(
     (SELECT m.fnos_uid FROM member m JOIN app_user a ON a.uid = m.fnos_uid
        WHERE m.relation = 'self' AND m.fnos_uid NOT IN ('', 'local-user')
@@ -385,9 +401,9 @@ function getDefaultCategories() {
   return DEFAULT_CATEGORIES;
 }
 
-/** 记录登录用户访问（幂等 upsert） */
+/** 记录登录用户访问（幂等 upsert）。本地开发的模拟用户（--dev-user）同样记录 */
 function touchUser(uid, name) {
-  if (!uid || uid === 'local-user') return;
+  if (!uid) return;
   const now = new Date().toISOString();
   db.prepare('INSERT INTO app_user (uid,name,last_seen) VALUES (?,?,?) ON CONFLICT(uid) DO UPDATE SET name=COALESCE(excluded.name,name), last_seen=excluded.last_seen')
     .run(uid, name || null, now);

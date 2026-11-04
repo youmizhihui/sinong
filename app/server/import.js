@@ -1,5 +1,5 @@
 /**
- * Excel 导入解析：支持挖财等多 sheet 格式（支出/收入/转账/借入借出/收款还款）
+ * Excel 导入解析：支持第三方账单等多 sheet 格式（支出/收入/转账/借入借出/收款还款）
  * 自动识别 sheet 类型 + 表头映射 + 名称匹配（分类/账户/成员），返回预览数据。
  */
 const XLSX = require('xlsx');
@@ -138,6 +138,7 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
     if (!entryDate) continue;
     const rowType = hasTypeCol ? String(row[fm.type] || '').trim() : sheetType;
     const amount = fm.amount !== undefined ? parseAmount(row[fm.amount]) : 0;
+    const amountNegative = fm.amount !== undefined && isNegativeAmount(row[fm.amount]);
     const note = (fm.note !== undefined ? String(row[fm.note] ?? '').trim() : '')
       || (fm.merchant !== undefined ? String(row[fm.merchant] ?? '').trim() : '');
     const categoryFull = (fm.category !== undefined ? String(row[fm.category] ?? '').trim() : '')
@@ -171,14 +172,16 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
         memberId = memIdx[memberName] || null;
         if (!memberId) result.newMembers.add(memberName);
       }
-      result.expense.push({
+      const item = {
         entryDate, amount, categoryId, categoryName: child || parent || '其他', categoryParent: parent || null,
         accountId, accountName: accountRaw || '现金',
         memberId, memberName: memberName || '',
         reimbursable: reimburse === '可报销' || reimburse === '待报销' || reimburse === '是',
         platform: platformRaw || null,
         note, rowNum: i + 1,
-      });
+      };
+      // 账单里「负数支出」= 退款信号：生成 refund 而不是 expense
+      (amountNegative ? result.refund : result.expense).push(item);
     } else if (rowType === 'income' || rowType === '收入') {
       let categoryId = parent ? catIdx.parentIndex[parent] || null : null;
       if (parent && !categoryId) result.newCategories.set(parent, 'income');
@@ -192,13 +195,15 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
         memberId = memIdx[memberName] || null;
         if (!memberId) result.newMembers.add(memberName);
       }
-      result.income.push({
+      const item = {
         entryDate, amount, categoryId, categoryName: parent || '其他收入',
         accountId, accountName: accountRaw || '现金',
         memberId, memberName: memberName || '',
         platform: platformRaw || null,
         note, rowNum: i + 1,
-      });
+      };
+      // 负数收入 = 冲销（钱被收回）：按支出入账，方向才对
+      (amountNegative ? result.expense : result.income).push(item);
     } else if (rowType === 'transfer' || rowType === '转账') {
       let from = accountFrom || '';
       let to = accountTo || '';
@@ -216,16 +221,31 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
         toId = accIdx[to] || null;
         if (!toId) result.newAccounts.add(to);
       }
+      let transferNote = note;
+      if (amountNegative) {
+        pushWarning(result, i + 1, `转账金额为负，已按反向处理，请核对转出/转入方向`);
+        [from, to] = [to, from];
+        [fromId, toId] = [toId, fromId];
+        transferNote = (note ? note + ' ' : '') + '[金额为负，已反向]';
+      }
       result.transfer.push({
         entryDate, amount, fromAccountId: fromId, fromAccountName: from || '',
         toAccountId: toId, toAccountName: to || '',
         platform: platformRaw || null,
-        note, rowNum: i + 1,
+        note: transferNote, rowNum: i + 1,
       });
     } else if (rowType === 'loan' || rowType === '借贷' || rowType === 'repay' || rowType === '收款还款' || rowType === '借入借出') {
       const LOAN_ACC = '借入借出';
       if (!accIdx[LOAN_ACC]) result.newAccounts.add(LOAN_ACC);
-      const isOutflow = /借出|还款|付出|贷出/.test(categoryFull || rowType);
+      let isOutflow = /借出|还款|付出|贷出/.test(categoryFull || rowType);
+      let loanLabel = categoryFull || rowType || '借贷';
+      let loanNote = note;
+      if (amountNegative) {
+        pushWarning(result, i + 1, `借贷金额为负，已按反向处理，请核对借出/收款方向`);
+        isOutflow = !isOutflow;
+        loanLabel = flipLoanDirectionWord(categoryFull);
+        loanNote = (note ? note + ' ' : '') + '[金额为负，已反向]';
+      }
       let accountId = null;
       if (accountRaw) {
         accountId = accIdx[accountRaw] || null;
@@ -238,7 +258,7 @@ function parseAiSheet(rows, spec, headerRow, catIdx, accIdx, memIdx, result) {
         toAccountId: isOutflow ? null : accountId,
         toAccountName: isOutflow ? LOAN_ACC : (accountRaw || '现金'),
         platform: platformRaw || null,
-        note: `[${categoryFull || '借贷'}] ${note}`.trim(),
+        note: `[${loanLabel}] ${loanNote}`.trim(),
         rowNum: i + 1,
       });
     }
@@ -261,6 +281,7 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
     const categoryFull = getVal(row, headerMap, 'categoryParent') || getVal(row, headerMap, 'categoryChild') || '';
     const [parent, child] = categoryFull.split('/').map((s) => s.trim());
     const amount = parseAmount(getVal(row, headerMap, 'amount'));
+    const amountNegative = isNegativeAmount(getVal(row, headerMap, 'amount'));
     const accountRaw = cleanAccountName(getVal(row, headerMap, 'account') || '');
     const memberRaw = getVal(row, headerMap, 'memberAmount') || getVal(row, headerMap, 'member') || '';
     const memberName = parseMember(memberRaw);
@@ -287,12 +308,14 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
         memberId = memIdx[memberName] || null;
         if (!memberId) result.newMembers.add(memberName);
       }
-      result.expense.push({
+      const item = {
         entryDate, amount, categoryId, categoryName: child || parent || '其他', categoryParent: parent || null,
         accountId, accountName: accountRaw || '现金',
         memberId, memberName: memberName || '',
         reimbursable: false, platform: platformRaw || null, note, rowNum: i + 1,
-      });
+      };
+      // 账单里「负数支出」= 退款信号：生成 refund 而不是 expense
+      (amountNegative ? result.refund : result.expense).push(item);
     } else if (flowType === '收入' || flowType === 'income') {
       let categoryId = parent ? catIdx.parentIndex[parent] || null : null;
       if (parent && !categoryId) result.newCategories.set(parent, 'income');
@@ -306,12 +329,14 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
         memberId = memIdx[memberName] || null;
         if (!memberId) result.newMembers.add(memberName);
       }
-      result.income.push({
+      const item = {
         entryDate, amount, categoryId, categoryName: parent || '其他收入',
         accountId, accountName: accountRaw || '现金',
         memberId, memberName: memberName || '',
         platform: platformRaw || null, note, rowNum: i + 1,
-      });
+      };
+      // 负数收入 = 冲销：按支出入账
+      (amountNegative ? result.expense : result.income).push(item);
     } else if (flowType === '转账' || flowType === 'transfer') {
       const { from, to } = parseTransferAccounts(accountRaw);
       let fromId = null, toId = null;
@@ -323,16 +348,35 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
         toId = accIdx[to] || null;
         if (!toId) result.newAccounts.add(to);
       }
+      // 负数转账：符号作为方向信号（源数据用负号表达转出方向），反转 from/to
+      let fromName = from || '';
+      let toName = to || '';
+      let transferNote = note;
+      if (amountNegative) {
+        pushWarning(result, i + 1, `转账金额为负（${String(getVal(row, headerMap, 'amount'))}），已按反向处理，请核对转出/转入方向`);
+        [fromName, toName] = [toName, fromName];
+        [fromId, toId] = [toId, fromId];
+        transferNote = (note ? note + ' ' : '') + '[金额为负，已反向]';
+      }
       result.transfer.push({
-        entryDate, amount, fromAccountId: fromId, fromAccountName: from || '',
-        toAccountId: toId, toAccountName: to || '',
-        platform: platformRaw || null, note, rowNum: i + 1,
+        entryDate, amount, fromAccountId: fromId, fromAccountName: fromName,
+        toAccountId: toId, toAccountName: toName,
+        platform: platformRaw || null, note: transferNote, rowNum: i + 1,
       });
     } else if (flowType === '借贷' || flowType === 'loan') {
       // 借出/还款：普通账户 → 借入借出；借入/收款：借入借出 → 普通账户
       const LOAN_ACC = '借入借出';
       if (!accIdx[LOAN_ACC]) result.newAccounts.add(LOAN_ACC);
-      const isOutflow = /借出|还款|付出|贷出/.test(categoryFull);
+      // 负数借贷：符号反转借出/收款方向（源数据用负号表达付出），并告警
+      let isOutflow = /借出|还款|付出|贷出/.test(categoryFull);
+      let loanLabel = categoryFull || '借贷';
+      let loanNote = note;
+      if (amountNegative) {
+        pushWarning(result, i + 1, `借贷金额为负（${String(getVal(row, headerMap, 'amount'))}），已按反向处理，请核对借出/收款方向`);
+        isOutflow = !isOutflow;
+        loanLabel = flipLoanDirectionWord(categoryFull);
+        loanNote = (note ? note + ' ' : '') + '[金额为负，已反向]';
+      }
       const accName = cleanAccountName(accountRaw);
       let accountId = null;
       if (accName) {
@@ -346,7 +390,7 @@ function parseSingleSheet(rows, headerRow, catIdx, accIdx, memIdx, result) {
         toAccountId: isOutflow ? null : accountId,
         toAccountName: isOutflow ? LOAN_ACC : (accName || '现金'),
         platform: platformRaw || null,
-        note: `[${categoryFull || '借贷'}] ${note}`.trim(),
+        note: `[${loanLabel}] ${loanNote}`.trim(),
         rowNum: i + 1,
       });
     }
@@ -381,6 +425,38 @@ function parseAmount(v) {
   const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
   // 系统约定 amount 恒为正整数（分），收支方向由 flow_type 决定；负数统一取绝对值
   return Number.isFinite(n) ? Math.abs(Math.round(n * 100)) : 0;
+}
+
+/**
+ * 原始金额是否为负。部分第三方账单用「负数支出」表达退款、负数收入表达冲销，
+ * parseAmount 取绝对值会丢掉这个信号，所以方向判定要在取 abs 之前做。
+ */
+function isNegativeAmount(v) {
+  if (v === null || v === undefined) return false;
+  return /-\s*\d/.test(String(v));
+}
+
+/**
+ * 记录一条「符号即信号」的归一化告警。
+ * 负数金额本应只出现在「支出(=退款)」与「收入(=冲销)」两个组合，
+ * 若出现在转账/借贷等其他类型，说明源数据的符号约定与预期不符，
+ * 需要显式提醒用户核对，而不是静默取绝对值。
+ */
+function pushWarning(result, rowNum, msg) {
+  result.warnings.push(`第${rowNum}行：${msg}`);
+}
+
+/**
+ * 翻转借贷方向词：借出↔借入、还款↔收款、付出↔收入。
+ * 负数借贷反转方向后，备注里的方向标签也要跟着翻转，避免与实际方向矛盾。
+ */
+function flipLoanDirectionWord(label) {
+  if (!label) return '借贷';
+  return String(label)
+    .replace(/借出/g, '\u0000').replace(/借入/g, '借出').replace(/\u0000/g, '借入')
+    .replace(/还款/g, '\u0001').replace(/收款/g, '还款').replace(/\u0001/g, '收款')
+    .replace(/付出/g, '\u0002').replace(/收入/g, '付出').replace(/\u0002/g, '收入')
+    .replace(/贷出/g, '贷入');
 }
 
 /** 解析日期为 YYYY-MM-DD HH:mm:ss */
@@ -466,7 +542,7 @@ function parseWorkbook(buffer, aiMapping) {
   const memIdx = buildMemberIndex();
 
   const result = {
-    expense: [], income: [], transfer: [],
+    expense: [], income: [], transfer: [], refund: [],
     newCategories: new Map(), newAccounts: new Set(), newMembers: new Set(),
     accountSheet: {}, // 账户sheet解析出的元信息：name → {typeLabel, status, visibility, statementDay, statementDayIncluded}
     warnings: [],
@@ -571,6 +647,7 @@ function parseWorkbook(buffer, aiMapping) {
         const parent = getVal(row, headerMap, 'categoryParent');
         const child = getVal(row, headerMap, 'categoryChild');
         const amount = parseAmount(getVal(row, headerMap, 'amount'));
+        const amountNegative = isNegativeAmount(getVal(row, headerMap, 'amount'));
         const accName = getVal(row, headerMap, 'account');
         const reimburse = getVal(row, headerMap, 'reimburse');
         const memberName = parseMember(getVal(row, headerMap, 'memberAmount'));
@@ -598,17 +675,20 @@ function parseWorkbook(buffer, aiMapping) {
           if (!memberId) result.newMembers.add(memberName);
         }
 
-        result.expense.push({
+        const item = {
           entryDate, amount, categoryId, categoryName: child || parent || '其他', categoryParent: parent || null,
           accountId, accountName: accName || '现金',
           memberId, memberName: memberName || '',
           reimbursable: reimburse === '可报销' || reimburse === '待报销',
           platform: platformRaw || null,
           note, rowNum: i + 1,
-        });
+        };
+        // 负数支出 = 退款
+        (amountNegative ? result.refund : result.expense).push(item);
       } else if (type === 'income') {
         const parent = getVal(row, headerMap, 'categoryParent');
         const amount = parseAmount(getVal(row, headerMap, 'amount'));
+        const amountNegative = isNegativeAmount(getVal(row, headerMap, 'amount'));
         const accName = getVal(row, headerMap, 'account');
         const memberName = parseMember(getVal(row, headerMap, 'memberAmount'));
         const platformRaw = getVal(row, headerMap, 'platform') || '';
@@ -628,17 +708,20 @@ function parseWorkbook(buffer, aiMapping) {
           if (!memberId) result.newMembers.add(memberName);
         }
 
-        result.income.push({
+        const item = {
           entryDate, amount, categoryId, categoryName: parent || '其他收入',
           accountId, accountName: accName || '现金',
           memberId, memberName: memberName || '',
           platform: platformRaw || null,
           note, rowNum: i + 1,
-        });
+        };
+        // 负数收入 = 冲销：按支出入账
+        (amountNegative ? result.expense : result.income).push(item);
       } else if (type === 'transfer') {
         const fromName = getVal(row, headerMap, 'accountFrom') || getVal(row, headerMap, 'account');
         const toName = getVal(row, headerMap, 'accountTo');
         const amount = parseAmount(getVal(row, headerMap, 'amount'));
+        const amountNegative = isNegativeAmount(getVal(row, headerMap, 'amount'));
         const platformRaw = getVal(row, headerMap, 'platform') || '';
 
         let fromId = null, toId = null;
@@ -651,17 +734,28 @@ function parseWorkbook(buffer, aiMapping) {
           if (!toId) result.newAccounts.add(toName);
         }
 
+        let f = fromName || '';
+        let t = toName || '';
+        let transferNote = note;
+        if (amountNegative) {
+          pushWarning(result, i + 1, `转账金额为负，已按反向处理，请核对转出/转入方向`);
+          [f, t] = [t, f];
+          [fromId, toId] = [toId, fromId];
+          transferNote = (note ? note + ' ' : '') + '[金额为负，已反向]';
+        }
+
         result.transfer.push({
-          entryDate, amount, fromAccountId: fromId, fromAccountName: fromName || '',
-          toAccountId: toId, toAccountName: toName || '',
+          entryDate, amount, fromAccountId: fromId, fromAccountName: f,
+          toAccountId: toId, toAccountName: t,
           platform: platformRaw || null,
-          note, rowNum: i + 1,
+          note: transferNote, rowNum: i + 1,
         });
       } else if (type === 'loan' || type === 'repay') {
         // 借入借出/收款还款 → 转账（普通账户 ⇄ 借入借出账户）
         const loanType = getVal(row, headerMap, 'loanType') || '';
         const accName = getVal(row, headerMap, 'account');
         const amount = parseAmount(getVal(row, headerMap, 'amount'));
+        const amountNegative = isNegativeAmount(getVal(row, headerMap, 'amount'));
         const platformRaw = getVal(row, headerMap, 'platform') || '';
         const LOAN_ACC = '借入借出';
 
@@ -674,7 +768,15 @@ function parseWorkbook(buffer, aiMapping) {
 
         // 借出/还款(付出)：普通账户 → 借入借出
         // 借入/收款：借入借出 → 普通账户
-        const isOutflow = /借出|还款|付出|贷出/.test(loanType);
+        let isOutflow = /借出|还款|付出|贷出/.test(loanType);
+        let loanLabel = loanType || '借贷';
+        let loanNote = note;
+        if (amountNegative) {
+          pushWarning(result, i + 1, `借贷金额为负，已按反向处理，请核对借出/收款方向`);
+          isOutflow = !isOutflow;
+          loanLabel = flipLoanDirectionWord(loanType);
+          loanNote = (note ? note + ' ' : '') + '[金额为负，已反向]';
+        }
         result.transfer.push({
           entryDate, amount,
           fromAccountId: isOutflow ? accountId : null,
@@ -682,7 +784,7 @@ function parseWorkbook(buffer, aiMapping) {
           toAccountId: isOutflow ? null : accountId,
           toAccountName: isOutflow ? LOAN_ACC : (accName || '现金'),
           platform: platformRaw || null,
-          note: `[${loanType || '借贷'}] ${note}`.trim(),
+          note: `[${loanLabel}] ${loanNote}`.trim(),
           rowNum: i + 1,
         });
       }
@@ -698,7 +800,8 @@ function buildSummary(result) {
     expenseCount: result.expense.length,
     incomeCount: result.income.length,
     transferCount: result.transfer.length,
-    total: result.expense.length + result.income.length + result.transfer.length,
+    refundCount: result.refund.length,
+    total: result.expense.length + result.income.length + result.transfer.length + result.refund.length,
     newCategories: [...result.newCategories.keys()],
     newAccounts: [...result.newAccounts],
     newMembers: [...result.newMembers],
@@ -712,11 +815,13 @@ function buildSummary(result) {
  * @param {object} parsed parseWorkbook 返回的对象（含 _parsed）
  * @param {string} ledgerId 当前账本 ID
  * @param {string} userUid 当前用户 UID
+ * @param {string} [fileName] 导入文件名（记录到批次，供整批撤销/追踪）
  */
-function doImport(parsed, ledgerId, userUid) {
+function doImport(parsed, ledgerId, userUid, fileName) {
   const db = getDb();
   const now = new Date().toISOString();
   const p = parsed._parsed;
+  const batchId = genId('impb');
   let created = 0;
 
   db.exec('BEGIN');
@@ -817,14 +922,28 @@ function doImport(parsed, ledgerId, userUid) {
     }
   }
 
+  // ---- 去重指纹 ----
+  // 只跟「数据库中已存在」的流水去重：同一账本内「账户 + 对端账户 + 日期时间 + 金额 + 类型 + 备注」视为同一笔。
+  // 源文件内部不去重——文件里有几行就导入几行（包括重复行、0 元行），保证和源数据一一对应。
+  // 重复导入同一个文件时，第二遍会因与库里已有指纹相同而被整体跳过。
+  const seen = new Set();
+  const fpOf = (parts) => parts.map((x) => (x === null || x === undefined ? '' : String(x).trim())).join('|');
+  for (const r of db.prepare('SELECT account_id, to_account_id, entry_date, amount, flow_type, note FROM entry WHERE ledger_id=?').all(ledgerId)) {
+    seen.add(fpOf([r.account_id, r.to_account_id, r.entry_date, r.amount, r.flow_type, r.note]));
+  }
+  let skippedDup = 0;      // 与库里已存在流水重复，跳过
+  let droppedTransfer = 0; // 转账缺对端账户，降级为单边记账（不再静默丢弃）
+
   // 写入支出
   const insertEntry = db.prepare(`INSERT INTO entry
-    (id,ledger_id,flow_type,amount,category_id,account_id,member_id,platform,entry_date,note,reimbursable,recorded_by,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    (id,ledger_id,flow_type,amount,category_id,account_id,member_id,platform,entry_date,note,reimbursable,recorded_by,created_at,updated_at,import_batch_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
   for (const e of p.expense) {
     const accountId = e.accountId || accIdx[e.accountName];
     if (!accountId) continue;
+    const fp = fpOf([accountId, null, e.entryDate, e.amount, 'expense', e.note]);
+    if (seen.has(fp)) { skippedDup++; continue; }
     let categoryId = e.categoryId;
     if (!categoryId && e.categoryParent && e.categoryName) {
       categoryId = catIdx.index[`${e.categoryParent}|${e.categoryName}`] || catIdx.parentIndex[e.categoryParent] || null;
@@ -832,7 +951,7 @@ function doImport(parsed, ledgerId, userUid) {
     if (!categoryId && e.categoryName) categoryId = catIdx.parentIndex[e.categoryName] || null;
     const memberId = e.memberId || (e.memberName && memIdx[e.memberName]) || null;
     insertEntry.run(genId('ent'), ledgerId, 'expense', e.amount, categoryId, accountId, memberId,
-      e.platform || null, e.entryDate, e.note, e.reimbursable ? 1 : 0, userUid, now, now);
+      e.platform || null, e.entryDate, e.note, e.reimbursable ? 1 : 0, userUid, now, now, batchId);
     created++;
   }
 
@@ -840,29 +959,78 @@ function doImport(parsed, ledgerId, userUid) {
   for (const e of p.income) {
     const accountId = e.accountId || accIdx[e.accountName];
     if (!accountId) continue;
+    const fp = fpOf([accountId, null, e.entryDate, e.amount, 'income', e.note]);
+    if (seen.has(fp)) { skippedDup++; continue; }
     const categoryId = e.categoryId || (e.categoryName && catIdx.parentIndex[e.categoryName]) || null;
     const memberId = e.memberId || (e.memberName && memIdx[e.memberName]) || null;
     insertEntry.run(genId('ent'), ledgerId, 'income', e.amount, categoryId, accountId, memberId,
-      e.platform || null, e.entryDate, e.note, 0, userUid, now, now);
+      e.platform || null, e.entryDate, e.note, 0, userUid, now, now, batchId);
+    created++;
+  }
+
+  // 写入退款（账单中的负数支出）：与支出同构，flow_type=refund，金额为正、方向由类型表达
+  for (const e of p.refund) {
+    const accountId = e.accountId || accIdx[e.accountName];
+    if (!accountId) continue;
+    const fp = fpOf([accountId, null, e.entryDate, e.amount, 'refund', e.note]);
+    if (seen.has(fp)) { skippedDup++; continue; }
+    let categoryId = e.categoryId;
+    if (!categoryId && e.categoryParent && e.categoryName) {
+      categoryId = catIdx.index[`${e.categoryParent}|${e.categoryName}`] || catIdx.parentIndex[e.categoryParent] || null;
+    }
+    if (!categoryId && e.categoryName) categoryId = catIdx.parentIndex[e.categoryName] || null;
+    const memberId = e.memberId || (e.memberName && memIdx[e.memberName]) || null;
+    insertEntry.run(genId('ent'), ledgerId, 'refund', e.amount, categoryId, accountId, memberId,
+      e.platform || null, e.entryDate, e.note, 0, userUid, now, now, batchId);
     created++;
   }
 
   // 写入转账
   const insertTransfer = db.prepare(`INSERT INTO entry
-    (id,ledger_id,flow_type,amount,account_id,to_account_id,platform,entry_date,note,recorded_by,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    (id,ledger_id,flow_type,amount,account_id,to_account_id,platform,entry_date,note,recorded_by,created_at,updated_at,import_batch_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
   for (const t of p.transfer) {
     const fromId = t.fromAccountId || accIdx[t.fromAccountName];
     const toId = t.toAccountId || accIdx[t.toAccountName];
-    if (!fromId || !toId || fromId === toId) continue;
-    insertTransfer.run(genId('ent'), ledgerId, 'transfer', t.amount, fromId, toId,
-      t.platform || null, t.entryDate, t.note, userUid, now, now);
+    // 双方都解析出来且不同：正常记转账
+    if (fromId && toId && fromId !== toId) {
+      const fp = fpOf([fromId, toId, t.entryDate, t.amount, 'transfer', t.note]);
+      if (seen.has(fp)) { skippedDup++; continue; }
+      insertTransfer.run(genId('ent'), ledgerId, 'transfer', t.amount, fromId, toId,
+        t.platform || null, t.entryDate, t.note, userUid, now, now, batchId);
+      created++;
+      continue;
+    }
+    // 缺对端 / 双方同账户：牺牲转账语义，降级为单边记账，并把原始账户字段写进备注以便追查
+    droppedTransfer++;
+    const sideId = fromId || toId;
+    if (!sideId) continue; // 两端都解析不出账户，无法入账（记入 droppedTransfer）
+    const dir = fromId ? 'out' : 'in';
+    const raw = [t.fromAccountName, t.toAccountName].filter(Boolean).join(' → ');
+    const note = `[转账] ${raw || ''} ${t.note || ''}`.trim();
+    if (dir === 'out') {
+      const fp = fpOf([sideId, null, t.entryDate, t.amount, 'expense', note]);
+      if (seen.has(fp)) { skippedDup++; continue; }
+      insertEntry.run(genId('ent'), ledgerId, 'expense', t.amount, null, sideId, null,
+        t.platform || null, t.entryDate, note, 0, userUid, now, now, batchId);
+    } else {
+      const fp = fpOf([sideId, null, t.entryDate, t.amount, 'income', note]);
+      if (seen.has(fp)) { skippedDup++; continue; }
+      insertEntry.run(genId('ent'), ledgerId, 'income', t.amount, null, sideId, null,
+        t.platform || null, t.entryDate, note, 0, userUid, now, now, batchId);
+    }
     created++;
   }
 
+  // 记录导入批次（供整批撤销/追踪）
+  const totalRows = p.expense.length + p.income.length + p.refund.length + p.transfer.length;
+  db.prepare(`INSERT INTO import_batch (id,ledger_id,file_name,total_rows,created_count,skipped_dup,created_by,created_at)
+    VALUES (?,?,?,?,?,?,?,?)`)
+    .run(batchId, ledgerId, fileName || null, totalRows, created, skippedDup, userUid, now);
+
   db.exec('COMMIT');
-  return { created };
+  return { created, skippedDup, droppedTransfer, batchId };
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;

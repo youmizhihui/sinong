@@ -190,6 +190,33 @@ export interface Settings {
   hideAmount: boolean
   /** 应用版本号，来源：manifest（服务端启动时读取） */
   version?: string
+  /** 是否为管理员（最早进入的用户），用于显示管理员功能入口 */
+  isAdmin?: boolean
+}
+
+/** 管理员视角的全库账本（含自己看不见的，用于找回归属） */
+export interface AdminLedger {
+  id: string
+  name: string
+  icon?: string
+  type?: 'private' | 'shared'
+  is_default: number
+  owner_uid?: string | null
+  ownerName?: string
+  entryCount?: number
+  memberNames?: string[]
+}
+
+/** 管理员视角的全库账户（含自己看不见的，用于找回归属） */
+export interface AdminAccount {
+  id: string
+  name: string
+  type: string
+  is_private: number
+  owner_uid?: string | null
+  ownerName?: string
+  balance: number
+  currentBalance: number
 }
 
 export interface FnosUser {
@@ -203,6 +230,8 @@ export interface ImportPreview {
   expenseCount: number
   incomeCount: number
   transferCount: number
+  /** 退款笔数（账单中的负数支出等） */
+  refundCount?: number
   total: number
   newCategories: string[]
   newAccounts: string[]
