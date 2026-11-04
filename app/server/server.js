@@ -266,14 +266,29 @@ function parseMultipart(buf, contentType) {
     let bodyEnd = block.length;
     if (block.endsWith('\r\n')) bodyEnd -= 2;
     const nameM = /name="([^"]*)"/.exec(head);
-    const fnM = /filename="([^"]*)"/.exec(head);
+    // filename*: RFC 5987 百分号编码（filename*=UTF-8''%E5%8F%B8...），优先且无需还原
+    const fnStarM = /filename\*=(?:utf-8|UTF-8)''([^;]+)/i.exec(head);
+    let filename = null;
+    if (fnStarM) {
+      try { filename = decodeURIComponent(fnStarM[1].trim()); } catch { filename = fnStarM[1]; }
+    } else {
+      const fnM = /filename="([^"]*)"/.exec(head);
+      // 浏览器以原始 UTF-8 字节发送 filename，上文按 latin1 拆过字节，这里还原
+      if (fnM) filename = fixLatin1Text(fnM[1]);
+    }
     if (nameM) {
       const raw = block.slice(bodyStart, bodyEnd);
       const body = Buffer.from(raw, 'latin1');
-      parts.push({ name: nameM[1], filename: fnM ? fnM[1] : null, body });
+      parts.push({ name: nameM[1], filename, body });
     }
   }
   return parts;
+}
+
+/** 还原被 latin1 逐字节拆开的 UTF-8 文本（与 fixHeaderText 同理，用于 multipart filename） */
+function fixLatin1Text(s) {
+  if (!s || !/[^\x20-\x7e]/.test(s)) return s;
+  try { return Buffer.from(s, 'latin1').toString('utf8'); } catch { return s; }
 }
 
 function parseJson(res, body, cb) {
@@ -1589,6 +1604,69 @@ function createRouter(user) {
       const r = doImport(parsed, lid, user.uid, cached.fileName);
       return { ok: true, created: r.created, skippedDup: r.skippedDup, droppedTransfer: r.droppedTransfer, batchId: r.batchId, ledgerId: lid };
     },
+    // ---- 导入批次：列表与整批撤销 ----
+    'GET /api/import/batches': (_b, _p, req) => {
+      const user = getUser(req);
+      if (!user) throw httpError(401, '未登录');
+      const batches = db.prepare('SELECT * FROM import_batch ORDER BY created_at DESC').all();
+      const out = batches.map((b) => {
+        const entryCount = db.prepare('SELECT COUNT(*) c FROM entry WHERE import_batch_id=?').get(b.id).c;
+        const editedCount = db.prepare("SELECT COUNT(*) c FROM entry WHERE import_batch_id=? AND updated_at != created_at").get(b.id).c;
+        // 挂在本批次流水上的 app 内退款记录数（撤销时保留退款、解除关联）
+        const refundLinkedCount = db.prepare(
+          "SELECT COUNT(*) c FROM entry r WHERE r.flow_type='refund' AND r.related_entry_id IN (SELECT id FROM entry WHERE import_batch_id=?)"
+        ).get(b.id).c;
+        const creator = db.prepare('SELECT name FROM app_user WHERE uid=?').get(b.created_by);
+        const ledgerRow = db.prepare('SELECT name FROM ledger WHERE id=?').get(b.ledger_id);
+        return {
+          id: b.id,
+          ledgerId: b.ledger_id,
+          ledgerName: ledgerRow?.name || '已删除账本',
+          fileName: b.file_name || null,
+          totalRows: b.total_rows,
+          createdCount: b.created_count,
+          skippedDup: b.skipped_dup,
+          createdAt: b.created_at,
+          createdByName: creator?.name || b.created_by || '未知',
+          entryCount,
+          editedCount,
+          refundLinkedCount,
+          canUndo: user.uid === b.created_by || isAdminUid(user.uid),
+        };
+      });
+      return { batches: out };
+    },
+    'DELETE /api/import/batches/:id': (_b, p, req) => {
+      const user = getUser(req);
+      if (!user) throw httpError(401, '未登录');
+      const b = db.prepare('SELECT * FROM import_batch WHERE id=?').get(p.id);
+      if (!b) throw httpError(404, '导入批次不存在');
+      if (user.uid !== b.created_by && !isAdminUid(user.uid)) throw httpError(403, '只有导入人或管理员可以撤销该批次');
+      const ids = db.prepare('SELECT id FROM entry WHERE import_batch_id=?').all(b.id).map((r) => r.id);
+      db.exec('BEGIN');
+      let unlinked = 0;
+      try {
+        // 挂在本批次支出上的 app 内退款：解除关联、保留退款记录本身（钱确实退回来了）
+        unlinked = db.prepare(
+          "UPDATE entry SET related_entry_id=NULL, updated_at=datetime('now','localtime') WHERE flow_type='refund' AND related_entry_id IN (SELECT id FROM entry WHERE import_batch_id=?)"
+        ).run(b.id).changes;
+        // 批次流水的凭证附件一并清理（行 + 文件路径先取出）
+        const atts = ids.length ? db.prepare(
+          `SELECT id,file_path FROM attachment WHERE entry_id IN (${ids.map(() => '?').join(',')})`
+        ).all(...ids) : [];
+        if (atts.length) db.prepare(`DELETE FROM attachment WHERE id IN (${atts.map(() => '?').join(',')})`).run(...atts.map((a) => a.id));
+        const del = db.prepare('DELETE FROM entry WHERE import_batch_id=?').run(b.id);
+        db.prepare('DELETE FROM import_batch WHERE id=?').run(b.id);
+        db.exec('COMMIT');
+        // 提交后再删附件文件，失败不影响数据一致性
+        for (const a of atts) { try { fs.unlinkSync(a.file_path); } catch (e) { /* 文件可能已不存在 */ } }
+        return { ok: true, deleted: del.changes, unlinked, attachments: atts.length };
+      } catch (e) {
+        db.exec('ROLLBACK');
+        throw e;
+      }
+    },
+
     // ---- AI 导入格式识别 ----
     'GET /api/ai/config': () => {
       const db = getDb();
@@ -2889,11 +2967,13 @@ function startMcpServer() {
     }
     touchUser(mcu.user_id, mcu.user_id);
     ensureSelfMember({ uid: mcu.user_id, name: mcu.user_id });
-    let body = '';
-    req.on('data', c => { body += c; if (body.length > 1e6) req.destroy(); });
+    // 按字节收集再一次性转 utf8：字符串拼接会把跨 chunk 的多字节中文字符切坏（U+FFFD）
+    const chunks = [];
+    let size = 0;
+    req.on('data', c => { chunks.push(c); size += c.length; if (size > 1e6) req.destroy(); });
     req.on('end', () => {
       let msg;
-      try { msg = JSON.parse(body); } catch { res.writeHead(400); res.end(); return; }
+      try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { res.writeHead(400); res.end(); return; }
       const { id, method, params } = msg;
       try {
         let result;

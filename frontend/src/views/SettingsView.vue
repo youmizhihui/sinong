@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: 'SettingsView' })
-import { Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag, Plug, Copy, RefreshCw, MessageCircle, ShieldCheck, AlertTriangle } from 'lucide-vue-next'
+import { Users, Tags, BookOpen, CalendarClock, Upload, Download, BrainCircuit, ShoppingBag, Plug, Copy, RefreshCw, MessageCircle, ShieldCheck, AlertTriangle, History } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { ref } from 'vue'
 import { api, type ImportPreview, type AiConfig } from '../api'
@@ -338,6 +338,14 @@ async function confirmImport() {
           <div class="muted">智能识别 Excel 表头，支持支出/收入/转账/借贷多 sheet，自动匹配分类账户</div>
         </div>
         <span class="muted">{{ importing ? '解析中…' : '›' }}</span>
+      </div>
+      <div class="row" style="cursor: pointer; border-top: 1px solid var(--border);" @click="router.push('/import-records')">
+        <span class="icon-badge"><History :size="18" /></span>
+        <div class="row-main">
+          <div class="row-title">导入记录</div>
+          <div class="muted">查看历次导入，可整批撤销导入的流水</div>
+        </div>
+        <span class="muted">›</span>
       </div>
       <div class="row" style="cursor: pointer; border-top: 1px solid var(--border);" @click="exportData">
         <span class="icon-badge"><Download :size="18" /></span>

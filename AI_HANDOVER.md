@@ -103,7 +103,7 @@ cd frontend; npm run dev
 
 ## 当前版本
 
-**v1.2.6** - 管理员功能（账本/账户找回、移交管理员）+ 隐私权限收口 + 账户编辑统一组件 + --dev-user 模拟用户；导入去重（与库内已有流水比对）与导入批次、金额符号归一化（负数支出→退款、负数转账/借贷反转并提醒）、转账降级为单边记账、修复账单退款被记成支出导致欠款虚增
+**v1.2.7** - 导入撤销（导入记录页、按批次整批撤销）+ 乱码修复（multipart 文件名 latin1 还原、MCP 跨包中文）；v1.2.6：管理员功能（账本/账户找回、移交管理员）+ 隐私权限收口 + 账户编辑统一组件 + --dev-user 模拟用户；导入去重（与库内已有流水比对）与导入批次、金额符号归一化（负数支出→退款、负数转账/借贷反转并提醒）、转账降级为单边记账、修复账单退款被记成支出导致欠款虚增
 
 > 版本号两处维护（真机进程读不到 manifest，运行时展示不依赖它）：
 > - 程序内唯一来源：`app/server/version.js` 的 VERSION（侧栏/settings API/MCP serverInfo 显示）
@@ -117,8 +117,10 @@ cd frontend; npm run dev
 2. **category 表没有 updated_at 列**
 3. **加新字段后老数据是 NULL**：WHERE 过滤要用 `IS NULL` 或回填，不能直接等值匹配
 4. **PowerShell 发 HTTP 中文 body 乱码**：要手动转 UTF-8 字节
-5. **fnOS manifest 的 os_min_version 别乱写**，容易拼错版本号导致安装被拒
-6. **MCP Server 的记账工具 description 要引导 AI 先调 list_* 工具**，别让 AI 瞎传分类名
+5. **multipart 上传的中文文件名**：自研 parseMultipart 按 latin1 拆字节，filename 必须经 `fixLatin1Text()` 还原（UTF-8 字节被拆成 latin1 字符），文件体也要 `Buffer.from(raw,'latin1')` 还原；存量乱码可用 `Buffer.from(s,'latin1').toString('utf8')` 还原
+6. **HTTP body 必须按字节收集**：`body += chunk` 字符串拼接会把跨 TCP 分包的多字节中文字符切坏（U+FFFD）；要 Buffer 收集 + `Buffer.concat().toString('utf8')`（主 API 的 readBody、MCP 服务器都是这个写法）
+7. **fnOS manifest 的 os_min_version 别乱写**，容易拼错版本号导致安装被拒
+8. **MCP Server 的记账工具 description 要引导 AI 先调 list_* 工具**，别让 AI 瞎传分类名
 
 ## 你现在要做什么？
 

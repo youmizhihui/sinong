@@ -14,6 +14,7 @@ const routes = [
   { path: '/ledgers', name: 'ledgers', component: () => import('./views/LedgersView.vue'), meta: { tab: false } },
   { path: '/periodics', name: 'periodics', component: () => import('./views/PeriodicsView.vue'), meta: { tab: false } },
   { path: '/admin', name: 'admin', component: () => import('./views/AdminView.vue'), meta: { tab: false } },
+  { path: '/import-records', name: 'import-records', component: () => import('./views/ImportBatchesView.vue'), meta: { tab: false } },
   { path: '/calendar', name: 'calendar', component: () => import('./views/CalendarView.vue'), meta: { tab: false } },
   { path: '/account/:id', name: 'account', component: () => import('./views/AccountDetailView.vue'), meta: { tab: false } },
   { path: '/search', name: 'search', component: () => import('./views/SearchView.vue'), meta: { tab: false } },

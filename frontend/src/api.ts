@@ -225,6 +225,25 @@ export interface FnosUser {
   last_seen: string
 }
 
+export interface ImportBatch {
+  id: string
+  ledgerId: string
+  ledgerName: string
+  fileName: string | null
+  totalRows: number
+  createdCount: number
+  skippedDup: number
+  createdAt: string
+  createdByName: string
+  /** 当前仍存在的该批次流水条数 */
+  entryCount: number
+  /** 其中导入后被手动修改过的条数（撤销时仍会删除） */
+  editedCount: number
+  /** 挂在本批次支出上的退款记录条数（撤销时保留退款、解除关联） */
+  refundLinkedCount: number
+  canUndo: boolean
+}
+
 export interface ImportPreview {
   token: string
   expenseCount: number
