@@ -151,7 +151,6 @@ function openDatePicker() {
   showDate.value = true
 }
 function confirmGroup() {
-  dateTouched.value = true
   const [hh, mm] = groupTimeValue.value
   const [y, mo, dd] = groupDateValue.value
   entryDate.value = new Date(Number(y), Number(mo) - 1, Number(dd), Number(hh), Number(mm))
@@ -264,16 +263,14 @@ function backspace() {
 }
 
 // ==================== 备注智能识别 ====================
-/** 用户是否手动操作过金额/分类/时间（识别结果只填没动过的字段） */
+/** 用户是否手动操作过金额/分类（识别结果只填没动过的字段；时间不参与识别） */
 const amountTouched = ref(false)
 const catTouched = ref(false)
-const dateTouched = ref(false)
 
 interface SmartSuggestion {
   amount: number | null
   categoryId: string | null
   categoryName: string | null
-  entryDate: string
   confidence: number
   trace: string[]
   source?: string
@@ -283,29 +280,12 @@ const smartLoading = ref(false)
 const aiLoading = ref(false)
 let smartTimer: ReturnType<typeof setTimeout> | null = null
 
-function dateBrief(dt: string) {
-  // 'YYYY-MM-DD HH:MM:SS' → 「今天 08:05」/「10月28日 12:30」
-  const [d, t] = dt.split(' ')
-  const [, M, D] = d.split('-').map(Number)
-  const hm = (t || '').slice(0, 5)
-  const now = new Date()
-  const same = (s: string) => {
-    const [y, m, dd] = s.split('-').map(Number)
-    return y === now.getFullYear() && m === now.getMonth() + 1 && dd === now.getDate()
-  }
-  const y = new Date(now); y.setDate(y.getDate() - 1)
-  const [yy, ym, yd] = [y.getFullYear(), y.getMonth() + 1, y.getDate()]
-  if (same(d)) return `今天 ${hm}`
-  if (yy === Number(d.slice(0, 4)) && ym === M && yd === D) return `昨天 ${hm}`
-  return `${M}月${D}日 ${hm}`
-}
 const suggestionText = computed(() => {
   const s = suggestion.value
   if (!s) return ''
   const parts: string[] = []
   if (s.amount) parts.push(`¥${(s.amount / 100).toFixed(2)}`)
   if (s.categoryName) parts.push(s.categoryName)
-  if (s.entryDate) parts.push(dateBrief(s.entryDate))
   return parts.join(' · ')
 })
 
@@ -359,12 +339,7 @@ function applySuggestion() {
     const parent = cats.value.find((g) => g.id === categoryId.value || (g.children || []).some((x) => x.id === categoryId.value))
     if (parent) activeTab.value = parent.id
   }
-  if (s.entryDate && !dateTouched.value) {
-    const [d, t] = s.entryDate.split(' ')
-    const [Y, M, D] = d.split('-').map(Number)
-    const [h, mi, se] = (t || '').split(':').map(Number)
-    entryDate.value = new Date(Y, M - 1, D, h || 0, mi || 0, se || 0)
-  }
+  // 时间不参与识别回填：只保留页面默认时间、手动调整、再记一笔留存的时间
   suggestion.value = null
   nextTick(() => { autoFilling = false })
 }
@@ -430,7 +405,6 @@ function resetForm() {
   // 新的一笔视为全新表单，识别结果可以正常填入
   amountTouched.value = false
   catTouched.value = false
-  dateTouched.value = false
 }
 
 async function doSave(resetRelations: boolean, keepEditing: boolean) {
@@ -527,7 +501,9 @@ onMounted(async () => {
       const active = d.groups.filter((g) => g.type !== 'archived')
       accounts.value = active.flatMap((g) => g.items)
       accGroups.value = active.filter((g) => g.items.length > 0)
-      const cash = accounts.value.find((a) => a.type === 'cash')
+      // 初始账户：用户设置的默认账户优先，其次第一个现金账户
+      const def = accounts.value.find((a) => a.is_default)
+      const cash = def || accounts.value.find((a) => a.type === 'cash')
       if (cash && !accountId.value && !editingId.value) accountId.value = cash.id
     }),
     api.get<Member[]>('members').then((m) => { members.value = m }).catch(() => { /* 成员接口容错 */ }),
@@ -623,7 +599,7 @@ onMounted(async () => {
 
     <!-- 备注 + AI 识别 -->
     <div class="note-row">
-      <input v-model="note" placeholder="备注（可选），如：早上8点包子5" />
+      <input v-model="note" placeholder="备注（可选）" />
       <button
         class="ai-btn" :class="{ loading: aiLoading }"
         :disabled="aiLoading || !note.trim()"

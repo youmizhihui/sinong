@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS account (
   sort       INTEGER NOT NULL DEFAULT 0,
   statement_day INTEGER,
   statement_day_included INTEGER NOT NULL DEFAULT 0,
+  is_default INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -280,6 +281,10 @@ function migrate() {
   if (!accCols.some((c) => c.name === 'statement_day_included')) {
     db.exec('ALTER TABLE account ADD COLUMN statement_day_included INTEGER NOT NULL DEFAULT 0');
   }
+  // 默认账户：全局唯一（设置新的会自动取消旧的），记账/MCP 兜底时优先使用
+  if (!accCols.some((c) => c.name === 'is_default')) {
+    db.exec('ALTER TABLE account ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0');
+  }
   // 所有账户统一按账期分组：账单日缺省按 1 号（= 自然月）
   db.exec('UPDATE account SET statement_day = 1 WHERE statement_day IS NULL OR statement_day < 1 OR statement_day > 31');
   // ---------- 归属回填 ----------
@@ -323,6 +328,36 @@ function migrate() {
        ORDER BY s.rowid LIMIT 1),
     ${REAL_UID}
   ) IS NOT NULL`);
+  // 存量修复：账户归属与账本类型不匹配。
+  // is_private 列后加（DEFAULT 0），早期账本已是私有的用户升级后：账本 private、账户全 shared，
+  // 记账按 is_private=1 过滤后一个可用账户都查不到（UI 记一笔选不到账户、MCP 报错）。
+  // 修复规则与「共享账本转私人」的手动转换一致：只翻转被私有账本使用、
+  // 且在任何共享账本中都没有流水的账户；多个不同 owner 的私有账本共用、
+  // 或私有账本尚未认领归属的，跳过不动（避免记错归属）
+  {
+    // 账户 → 引用它的账本集合（含转账转入方）
+    const refs = db.prepare(`
+      SELECT e.account_id AS aid, l.type, l.owner_uid FROM entry e JOIN ledger l ON l.id = e.ledger_id
+      UNION
+      SELECT e.to_account_id AS aid, l.type, l.owner_uid FROM entry e JOIN ledger l ON l.id = e.ledger_id
+      WHERE e.to_account_id IS NOT NULL
+    `).all();
+    const usage = new Map(); // aid → { shared: bool, owners: Set }
+    for (const r of refs) {
+      if (!r.aid) continue;
+      let u = usage.get(r.aid);
+      if (!u) { u = { shared: false, owners: new Set() }; usage.set(r.aid, u); }
+      if (r.type === 'shared') u.shared = true;
+      else if (r.owner_uid) u.owners.add(r.owner_uid);
+    }
+    const flip = db.prepare('UPDATE account SET is_private = 1, owner_uid = ?, updated_at = ? WHERE id = ? AND is_private = 0');
+    const now = new Date().toISOString();
+    for (const [aid, u] of usage) {
+      if (u.shared || u.owners.size !== 1) continue;
+      const owner = [...u.owners][0];
+      flip.run(owner, now, aid);
+    }
+  }
   // 历史导入残留的负金额修正：系统约定 amount 恒为正，方向由 flow_type 决定
   db.exec('UPDATE entry SET amount = ABS(amount) WHERE amount < 0');
   // 默认消费平台种子（表空时才插入，用户自定义后不再覆盖）

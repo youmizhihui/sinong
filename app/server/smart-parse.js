@@ -4,14 +4,16 @@
  * 快速记账文本解析（本地规则层，纯函数、不依赖数据库）
  *
  * 输入一段口语化文本（如「早上8点包子5」「昨天打车23块」），
- * 输出结构化的记账字段：金额、分类路径、发生时间、置信度与识别轨迹。
+ * 输出结构化的记账字段：金额、分类路径、置信度与识别轨迹。
  *
- * 分层：日期词 → 时刻 → 金额 → 关键词规则（含二级）→ 餐次推断 → 合并时间
+ * 只识别分类和金额，不识别日期/时刻（识别出来的日期不准，一律记当前时间）。
+ * 分层：时刻摘除 → 金额 → 关键词规则（含二级）→ 餐次推断
  * 设计约束：
- *  - 时刻里的数字不参与金额（「早上8点」的 8 不是钱）：先摘除时间表达式再扫金额
+ *  - 时刻里的数字不参与金额（「早上8点」的 8 不是钱）：先摘除时间表达式再扫金额；
+ *    摘除只为了保护金额扫描，摘掉的时间本身不进识别结果
  *  - 金额优先带单位（元/块/￥），否则取最后一个合法裸数字
  *  - 关键词规则表按顺序匹配，命中即得一级/二级分类（如「红方印」→ 餐饮-烟酒）
- *  - 餐饮命中但没有具体二级时按时刻落餐次（早餐/午餐/晚餐/夜宵，常识时段）
+ *  - 餐饮命中但没有具体二级时按当前时刻落餐次（早餐/午餐/晚餐/夜宵，常识时段）
  *  - 文本里明确写了「早餐/午饭」等词时直接用词面，优先于其他规则
  *
  * 调用方（server.js 路由）负责把 categoryPath 映射为账本内真实的 categoryId。
@@ -99,8 +101,8 @@ const p2 = (n) => String(n).padStart(2, '0');
 /**
  * @param {string} text 用户输入文本
  * @param {{now?: Date}} opts 当前时间（缺省取系统时间）
- * @returns {{amountFen: number|null, categoryPath: string[]|null, entryDate: string, confidence: number, trace: string[], note: string}}
- *   amountFen 金额（分）；categoryPath 如 ['餐饮','早餐']；entryDate 完整 'YYYY-MM-DD HH:MM:SS'
+ * @returns {{amountFen: number|null, categoryPath: string[]|null, confidence: number, trace: string[], note: string}}
+ *   amountFen 金额（分）；categoryPath 如 ['餐饮','早餐']；不返回时间（时间由表单自己管理）
  */
 function parseQuickEntry(text, opts = {}) {
   const now = opts.now instanceof Date ? opts.now : new Date();
@@ -108,45 +110,19 @@ function parseQuickEntry(text, opts = {}) {
   let work = original;
   const trace = [];
 
-  // ---- 1) 日期词（今天/昨天/前天/明天）----
-  let dayOffset = 0;
-  const dm = /(前天|昨天|明日|明天|今日|今天)/.exec(work);
-  if (dm) {
-    dayOffset = dm[1] === '前天' ? -2 : (dm[1] === '昨天' || dm[1] === '昨日') ? -1 : dm[1] === '明天' || dm[1] === '明日' ? 1 : 0;
-    trace.push(`日期:「${dm[1]}」`);
-    work = work.replace(dm[0], ' ');
-  }
-
-  // ---- 2) 时刻（中文时刻词 + 数字点 / HH:MM），摘除后不干扰金额 ----
-  let hh = null;
-  let mi = null;
+  // ---- 1) 摘除时间表达式（中文时刻词 + 数字点 / HH:MM）----
+  // 只为了防止「早上8点」的 8 被当成金额，摘掉的时间本身不进识别结果
   const cm = /(凌晨|清晨|早上|早晨|上午|中午|午后|下午|傍晚|晚上|夜里|深夜|半夜)?\s*(\d{1,2})\s*[点时]\s*(?:([半\d]{1,2})\s*分?)?/.exec(work);
   if (cm && Number(cm[2]) <= 24) {
-    let h = Number(cm[2]);
-    let m = 0;
-    if (cm[3]) m = cm[3] === '半' ? 30 : Number(cm[3]) % 100;
-    const period = cm[1] || '';
-    if (['下午', '傍晚', '晚上', '夜里', '深夜', '午后'].includes(period) && h < 12) h += 12;
-    if (period === '中午' && h < 11) h += 12;
-    if (h === 24) h = 0;
-    if (h <= 23 && m <= 59) {
-      hh = h;
-      mi = m;
-      trace.push(`时间:${p2(hh)}:${p2(mi)}`);
-      work = work.replace(cm[0], ' ');
-    }
-  }
-  if (hh === null) {
+    const h = Number(cm[2]);
+    const m = cm[3] ? (cm[3] === '半' ? 30 : Number(cm[3]) % 100) : 0;
+    if (h <= 23 && m <= 59) work = work.replace(cm[0], ' ');
+  } else {
     const hm = /(\d{1,2}):([0-5]\d)/.exec(work);
-    if (hm) {
-      hh = Number(hm[1]);
-      mi = Number(hm[2]);
-      trace.push(`时间:${p2(hh)}:${p2(mi)}`);
-      work = work.replace(hm[0], ' ');
-    }
+    if (hm) work = work.replace(hm[0], ' ');
   }
 
-  // ---- 3) 金额：带单位优先，否则取最后一个合法裸数字 ----
+  // ---- 2) 金额：带单位优先，否则取最后一个合法裸数字 ----
   let amountFen = null;
   const um = /(?:¥|￥)?(\d+(?:\.\d+)?)\s*(?:元|块钱|块|圆|rmb|RMB)/.exec(work);
   if (um) {
@@ -172,7 +148,7 @@ function parseQuickEntry(text, opts = {}) {
     trace.pop();
   }
 
-  // ---- 4) 分类关键词：词面餐次词优先，再走规则表 ----
+  // ---- 3) 分类关键词：词面餐次词优先，再走规则表 ----
   let parentName = null;
   let subName = null;
   const mealWord = Object.keys(MEAL_WORDS).find((w) => work.includes(w));
@@ -190,22 +166,14 @@ function parseQuickEntry(text, opts = {}) {
       break;
     }
   }
-  // 餐饮但文本没写餐次 → 按时刻推断
+  // 餐饮但文本没写餐次 → 按当前时刻推断（不识别文本时间）
   if (parentName === '餐饮' && !subName) {
-    const h = hh !== null ? hh : now.getHours();
-    const minutes = h * 60 + (hh !== null ? mi : now.getMinutes());
+    const minutes = now.getHours() * 60 + now.getMinutes();
     subName = mealSlotOf(minutes);
-    trace.push(`时段:${p2(h)}:${p2(hh !== null ? mi : now.getMinutes())}→${subName}`);
+    trace.push(`时段:${p2(now.getHours())}:${p2(now.getMinutes())}→${subName}`);
   }
 
-  // ---- 5) 合并时间：识别到的日期/时刻 + 未识别部分补当前时间 ----
-  const base = new Date(now);
-  if (dayOffset) base.setDate(base.getDate() + dayOffset);
-  const outH = hh !== null ? hh : now.getHours();
-  const outM = hh !== null ? mi : now.getMinutes();
-  const entryDate = `${base.getFullYear()}-${p2(base.getMonth() + 1)}-${p2(base.getDate())} ${p2(outH)}:${p2(outM)}:${p2(now.getSeconds())}`;
-
-  // ---- 6) 置信度 ----
+  // ---- 4) 置信度 ----
   let confidence = 0;
   if (parentName && amountFen !== null) confidence = 0.9;
   else if (parentName) confidence = 0.6;
@@ -214,7 +182,6 @@ function parseQuickEntry(text, opts = {}) {
   return {
     amountFen,
     categoryPath: parentName ? (subName ? [parentName, subName] : [parentName]) : null,
-    entryDate,
     confidence,
     trace,
     note: original,

@@ -8,4 +8,4 @@
  *   1. 本文件 VERSION（程序内展示：侧栏、settings API、MCP serverInfo）
  *   2. 项目根目录 manifest 的 version= 行（fpk 打包用）
  */
-module.exports = { VERSION: '1.2.7' };
+module.exports = { VERSION: '1.2.8' };

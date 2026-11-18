@@ -24,7 +24,7 @@ const TYPE_DESC: Record<string, string> = {
 }
 
 const EMPTY_FORM = {
-  type: 'cash', name: '', note: '', balance: '', isPrivate: false, statementDay: 1, statementDayIncluded: false,
+  type: 'cash', name: '', note: '', balance: '', isPrivate: false, isDefault: false, statementDay: 1, statementDayIncluded: false,
 }
 const form = ref({ ...EMPTY_FORM })
 const saving = ref(false)
@@ -53,6 +53,7 @@ function init() {
         note: a.note || '',
         balance: '',
         isPrivate: !!a.is_private,
+        isDefault: !!a.is_default,
         statementDay: a.statement_day || 1,
         statementDayIncluded: !!a.statement_day_included,
       }
@@ -102,6 +103,7 @@ async function save() {
       note: form.value.note.trim() || null,
       type: form.value.type,
       isPrivate: form.value.isPrivate,
+      isDefault: form.value.isDefault,
       statementDay: form.value.statementDay || 1,
       statementDayIncluded: form.value.statementDay > 1 ? form.value.statementDayIncluded : false,
     }
@@ -173,6 +175,12 @@ async function save() {
         <input v-model="form.isPrivate" type="checkbox" :disabled="!canEditPrivacy" />
         <span>私有账户</span>
         <small>{{ canEditPrivacy ? '仅在私人账本中可见，共享成员看不到' : '家庭共用账户，只有创建者能改归属' }}</small>
+      </label>
+
+      <label class="privacy-row">
+        <input v-model="form.isDefault" type="checkbox" />
+        <span>设为默认账户</span>
+        <small>记一笔与 AI 记账优先用它；共享账户全家共一个默认，私有账户每个成员可各设一个</small>
       </label>
 
       <slot name="footer" />

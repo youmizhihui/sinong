@@ -56,6 +56,8 @@ export interface Account {
   note?: string
   statement_day?: number
   statement_day_included?: number
+  /** 默认账户（按归属范围唯一：共享账户全家一个，私有账户每个成员各一个） */
+  is_default?: number
   currentBalance: number
   /** 能否改归属 / 删除（仅创建者）；共享账户所有成员可见但归属不归他们 */
   canManage?: boolean

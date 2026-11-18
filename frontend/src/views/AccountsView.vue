@@ -119,6 +119,7 @@ onActivated(load)
             <div class="row-main">
               <div class="row-title">
                 {{ a.name }}
+                <span v-if="a.is_default" class="default-tag">默认</span>
                 <span v-if="a.is_private" class="private-tag">私有</span>
                 <span v-if="a.type === 'archived'" class="archived-tag">已封存</span>
               </div>
@@ -176,6 +177,10 @@ onActivated(load)
 .private-tag {
   font-size: 10px; padding: 1px 6px; border-radius: 4px;
   background: #FEF3C7; color: #92400E; font-weight: 400;
+}
+.default-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  background: var(--brand-soft, #EFF6FF); color: var(--brand, #2563EB); font-weight: 400;
 }
 .row.archived { opacity: 0.55; }
 .row-edit {

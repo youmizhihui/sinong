@@ -428,6 +428,34 @@ function assertAccountManageable(acc, user) {
 }
 
 /**
+ * 设为默认账户：按归属范围唯一——共享账户里全家共一个默认，
+ * 私有账户里每个成员各一个默认（设新的自动取消同范围的旧默认）。
+ * 记一笔页初始账户与 MCP 兜底账户优先用它；账本类型/归属不匹配时再退回现金等兜底链。
+ */
+function setDefaultAccount(accountId) {
+  const db = getDb();
+  const acc = db.prepare('SELECT is_private, owner_uid FROM account WHERE id=?').get(accountId);
+  if (!acc) throw httpError(404, '账户不存在');
+  // node:sqlite 没有 .transaction()，手动开关事务（单线程服务内无并发问题）
+  db.exec('BEGIN');
+  try {
+    if (acc.is_private) {
+      // 私有默认：只清同一归属的其他私有默认（owner_uid 为空的历史数据按空串归堆）
+      db.prepare("UPDATE account SET is_default=0 WHERE is_default=1 AND is_private=1 AND COALESCE(owner_uid,'')=? AND id<>?")
+        .run(acc.owner_uid || '', accountId);
+    } else {
+      // 共享默认：清其他共享账户的默认
+      db.prepare('UPDATE account SET is_default=0 WHERE is_default=1 AND is_private=0 AND id<>?').run(accountId);
+    }
+    db.prepare('UPDATE account SET is_default=1, updated_at=? WHERE id=?').run(nowIso(), accountId);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+/**
  * 无主共享账户认领：种子「现金」账户建于 migrate 之后（建库时还没有用户），
  * 早期版本也不写归属，这类账户没有创建者就没法改归属/删除。
  * 统一认给管理员（最早进入的用户），与迁移回填同口径，而不是随首个访问者漂移。
@@ -1028,7 +1056,7 @@ function createRouter(user) {
     },
     'POST /api/accounts': async (body, _p, req) => {
       const user = getUser(req);
-      const { type, name, balance, note, isPrivate, statementDay, statementDayIncluded } = body;
+      const { type, name, balance, note, isPrivate, statementDay, statementDayIncluded, isDefault } = body;
       if (!type || !name) throw httpError(400, '类型与名称必填');
       const id = genId('acc');
       const now = nowIso();
@@ -1038,6 +1066,7 @@ function createRouter(user) {
       const sdi = statementDayIncluded ? 1 : 0;
       db.prepare('INSERT INTO account (id,type,name,balance,is_private,owner_uid,note,sort,statement_day,statement_day_included,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(id, type, name, Number.isInteger(balance) ? balance : 0, isPrivateVal, user.uid, note || null, 0, sd, sdi, now, now);
+      if (isDefault) setDefaultAccount(id);
       return db.prepare('SELECT * FROM account WHERE id=?').get(id);
     },
     'GET /api/accounts/:id': (_b, p, req) => {
@@ -1187,6 +1216,14 @@ function createRouter(user) {
       }
       if (body.statementDayIncluded !== undefined) {
         fields.push('statement_day_included=?'); vals.push(body.statementDayIncluded ? 1 : 0);
+      }
+      // 默认账户：设置走全局唯一逻辑（自动取消旧默认），取消只清自己
+      if (body.isDefault !== undefined) {
+        if (body.isDefault) {
+          setDefaultAccount(p.id);
+        } else if (a.is_default) {
+          fields.push('is_default=0');
+        }
       }
       if (!fields.length) return db.prepare('SELECT * FROM account WHERE id=?').get(p.id);
       fields.push('updated_at=?'); vals.push(nowIso()); vals.push(p.id);
@@ -1912,7 +1949,6 @@ function createRouter(user) {
         amount: r.amountFen,
         categoryId,
         categoryName,
-        entryDate: r.entryDate,
         confidence: r.confidence,
         trace: r.trace,
         note: r.note,
@@ -1936,21 +1972,12 @@ function createRouter(user) {
           role: 'system',
           content: '你是家庭记账应用的智能解析器。从用户文本中识别一笔支出记录，只输出一个 JSON 对象，不要输出任何其他文字。'
             + '字段：amount_fen（金额，单位分，整数；文本没有金额则 null）、category（分类，格式"一级/二级"，必须从给出的分类中选择，不确定则 null）、'
-            + 'entry_datetime（发生时间，格式 YYYY-MM-DD HH:MM:SS，根据文本中的时间词推算；没有明确时间用 null）、'
-            + 'confidence（0 到 1 的小数，表示整体识别把握）、reason（20 字内的识别理由）。',
+            + 'confidence（0 到 1 的小数，表示整体识别把握）、reason（20 字内的识别理由）。'
+            + '不要识别日期时间，日期由应用自动记当前时间。',
         },
         { role: 'user', content: `当前时间：${nowStr}\n可选分类：${catLines}\n用户文本：「${text}」` },
       ]);
       const amountFen = Number.isInteger(data.amount_fen) && data.amount_fen > 0 && data.amount_fen <= 100000000 ? data.amount_fen : null;
-      const dtStr = typeof data.entry_datetime === 'string' && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/.test(data.entry_datetime.trim())
-        ? data.entry_datetime.trim() : null;
-      // 时间兜底：AI 只给了日期没有时刻 → 补当前时刻；全空 → 当前时间
-      let entryDate;
-      if (dtStr) {
-        entryDate = dtStr.length === 10 ? `${dtStr} ${nowStr.slice(11)}` : dtStr;
-      } else {
-        entryDate = `${nowStr}:${p2(now.getSeconds())}`;
-      }
       // 分类映射（与本地路由同规则）
       let categoryId = null;
       let categoryName = null;
@@ -1978,7 +2005,6 @@ function createRouter(user) {
         amount: amountFen,
         categoryId,
         categoryName,
-        entryDate,
         confidence,
         trace: [String(data.reason || 'AI 识别')],
         note: text,
@@ -2566,8 +2592,22 @@ function resolveMcpToken(token) {
 function findCategoryId(ledgerId, name, flowType) {
   if (!name) return null;
   const db = getDb();
-  const like = `%${name}%`;
   const ft = flowType === 'income' ? 'income' : 'expense';
+  // 支持「父 > 子」格式（list_categories 返回的就是这个格式，AI 常原样传回）：
+  // 拆开后按「父分类名 + 子分类名」联合匹配，父名匹配不上时退化为只匹配子分类名
+  const parts = String(name).split(/\s*>\s*/).map(s => s.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    const parentName = parts[parts.length - 2];
+    const childName = parts[parts.length - 1];
+    let r = db.prepare(`SELECT c.id FROM category c JOIN category p ON c.parent_id = p.id
+      WHERE c.name LIKE ? AND p.name LIKE ? AND c.parent_id IS NOT NULL AND c.type = ? LIMIT 1`)
+      .get(`%${childName}%`, `%${parentName}%`, ft);
+    if (r) return r.id;
+    r = db.prepare(`SELECT id FROM category WHERE name LIKE ? AND parent_id IS NOT NULL AND type = ? LIMIT 1`)
+      .get(`%${childName}%`, ft);
+    return r?.id || null;
+  }
+  const like = `%${name}%`;
   let r = db.prepare(`SELECT id FROM category WHERE name LIKE ? AND parent_id IS NOT NULL AND type = ? LIMIT 1`).get(like, ft);
   if (r) return r.id;
   r = db.prepare(`SELECT id FROM category WHERE name LIKE ? AND parent_id IS NULL AND type = ? LIMIT 1`).get(like, ft);
@@ -2582,16 +2622,35 @@ function findPlatform(name) {
   return r?.name || name;
 }
 /** 按名称模糊匹配账户 ID */
-function findAccountId(ledgerId, name) {
+function findAccountId(ledgerId, name, userId) {
   if (!name) return null;
   const db = getDb();
   const like = `%${name}%`;
-  // 按账本类型匹配：私人账本只能命中私有账户，共享账本只能命中共享账户，
-  // 否则会匹配到本账本用不了的账户，记账时被归属校验拦掉
+  // 按账本类型匹配：私人账本只能命中本人的私有账户（owner 也得是自己的），
+  // 共享账本只能命中共享账户，否则会匹配到本账本用不了的账户，记账时被归属校验拦掉
   const lg = ledgerId ? db.prepare('SELECT type FROM ledger WHERE id=?').get(ledgerId) : null;
   const wantPrivate = lg && lg.type === 'private' ? 1 : 0;
-  const r = db.prepare('SELECT id FROM account WHERE name LIKE ? AND is_private=? LIMIT 1').get(like, wantPrivate);
+  const r = db.prepare('SELECT id FROM account WHERE name LIKE ? AND is_private=? AND (is_private=0 OR owner_uid=?) LIMIT 1')
+    .get(like, wantPrivate, userId || '');
   return r?.id || null;
+}
+/** 找本账本当前用户可用的兜底账户：默认账户 → 现金 → 第一个可用账户 */
+function findFallbackAccount(ledgerId, userId) {
+  const db = getDb();
+  const lg = ledgerId ? db.prepare('SELECT type FROM ledger WHERE id=?').get(ledgerId) : null;
+  const wantPrivate = lg && lg.type === 'private' ? 1 : 0;
+  const ownerCond = wantPrivate ? 'AND owner_uid=?' : '';
+  const ownerParam = wantPrivate ? [userId || ''] : [];
+  // 1) 归属范围内的默认账户：共享账本用共享默认，私有账本用本人私有默认
+  //    （范围外的默认自然落空，继续走后面的兜底）
+  //    注意：本函数返回行对象（调用方取 .id），不能直接 return 字符串
+  const def = wantPrivate
+    ? db.prepare("SELECT id FROM account WHERE is_default=1 AND is_private=1 AND COALESCE(owner_uid,'')=? LIMIT 1").get(userId || '')
+    : db.prepare('SELECT id FROM account WHERE is_default=1 AND is_private=0 LIMIT 1').get();
+  if (def) return def;
+  // 2) 名字带「现金」的账户 → 3) 第一个可用账户
+  return db.prepare(`SELECT id FROM account WHERE is_private=? ${ownerCond} AND name LIKE '%现金%' ORDER BY sort LIMIT 1`).get(wantPrivate, ...ownerParam)
+    || db.prepare(`SELECT id FROM account WHERE is_private=? ${ownerCond} ORDER BY sort LIMIT 1`).get(wantPrivate, ...ownerParam);
 }
 /** 按名称模糊匹配成员 ID */
 function findMemberId(ledgerId, name) {
@@ -2605,7 +2664,7 @@ function findMemberId(ledgerId, name) {
 const MCP_TOOLS = [
   {
     name: 'add_expense',
-    description: '记一笔支出。amount 单位为元（如 25.5 表示 25.5 元）。category 填支出分类名，account 填账户名，member 填消费成员姓名。注意：分类、账户、成员的名称必须与系统中实际存在的完全匹配，调用前请先调用 list_categories、list_accounts、list_members 获取可用列表。member 不填默认自己。',
+    description: '记一笔支出。amount 单位为元（如 25.5 表示 25.5 元）。category 填支出分类名（支持「父 > 子」格式），account 填账户名，member 填消费成员姓名。注意：分类、账户、成员的名称必须与系统中实际存在的完全匹配，调用前请先调用 list_categories、list_accounts、list_members 获取可用列表。member 不填默认自己。若报错「当前账本没有可用的账户」，请先调用 create_account 创建账户后再记账。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2622,7 +2681,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'add_income',
-    description: '记一笔收入。amount 单位为元。分类、账户、成员名称必须与系统中实际存在的完全匹配，调用前请先调用 list_categories、list_accounts、list_members 获取可用列表。',
+    description: '记一笔收入。amount 单位为元。分类、账户、成员名称必须与系统中实际存在的完全匹配（分类支持「父 > 子」格式），调用前请先调用 list_categories、list_accounts、list_members 获取可用列表。若报错「当前账本没有可用的账户」，请先调用 create_account 创建账户后再记账。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2763,14 +2822,17 @@ function mcpCallTool(name, args, mcpUser) {
 
   if (name === 'add_expense' || name === 'add_income') {
     const flowType = name === 'add_expense' ? 'expense' : 'income';
-    let accountId = findAccountId(ledgerId, args.account);
+    let accountId = findAccountId(ledgerId, args.account, userId);
+    let accountMatched = !!accountId;
     if (!accountId) {
       // 没指定或匹配不到账户时，选第一个本账本能用的账户（优先现金）
-      const lgType = db.prepare('SELECT type FROM ledger WHERE id=?').get(ledgerId)?.type || 'shared';
-      const wantPrivate = lgType === 'private' ? 1 : 0;
-      const fallback = db.prepare('SELECT id FROM account WHERE is_private=? AND name LIKE ? ORDER BY sort LIMIT 1').get(wantPrivate, '%现金%')
-        || db.prepare('SELECT id FROM account WHERE is_private=? ORDER BY sort LIMIT 1').get(wantPrivate);
+      const fallback = findFallbackAccount(ledgerId, userId);
       accountId = fallback?.id;
+    }
+    // 账本里一个可用账户都没有（典型：私有账本 + 账户全是共享的存量数据）→
+    // 必须报人话错误并引导 AI 用 create_account 自救，而不是让 createEntry 抛「缺少必填字段」
+    if (!accountId) {
+      throw new Error(`当前账本没有可用的账户（账户归属与账本类型不匹配），无法记账。请先调用 create_account 创建一个账户，再重新调用 ${name}`);
     }
     const categoryId = findCategoryId(ledgerId, args.category, flowType);
     const memberId = findMemberId(ledgerId, args.member);
@@ -2780,11 +2842,15 @@ function mcpCallTool(name, args, mcpUser) {
       entryDate: args.date ? `${args.date} ${nowLocal().slice(11)}` : nowLocal(),
       platform: args.platform ? findPlatform(args.platform) : null,
     });
-    return mcpResult(`已记${flowType === 'expense' ? '支出' : '收入'} ¥${(cents / 100).toFixed(2)}` + (args.category ? `（${args.category}）` : ''));
+    const accName = db.prepare('SELECT name FROM account WHERE id=?').get(accountId)?.name || '';
+    const catText = categoryId ? (args.category || '') : '未分类';
+    const hint = accountMatched || !args.account ? '' : `（账户"${args.account}"未找到，已记到"${accName}"）`;
+    return mcpResult(`已记${flowType === 'expense' ? '支出' : '收入'} ¥${(cents / 100).toFixed(2)}` +
+      (catText ? `（分类：${catText}）` : '') + `，账户：${accName}` + hint);
   }
   if (name === 'add_transfer') {
-    const fromId = findAccountId(ledgerId, args.from_account);
-    const toId = findAccountId(ledgerId, args.to_account);
+    const fromId = findAccountId(ledgerId, args.from_account, userId);
+    const toId = findAccountId(ledgerId, args.to_account, userId);
     if (!fromId || !toId) throw new Error('找不到指定的账户');
     const memberId = findMemberId(ledgerId, args.member);
     createEntry(user, {
